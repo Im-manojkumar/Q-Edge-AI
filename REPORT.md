@@ -21,7 +21,10 @@ in approximation ratio at a few dollars per task. The framework detects both reg
 When a QPU is used, *which* QPU and which qubits matter: routing each circuit by per-qubit calibration data
 cut the average output error by 37% against a fixed device (2.2x median reduction, up to 17x on small
 circuits) across 16 circuits on eight IBM device calibrations, and avoided broken qubit links that the
-default placement walked into.
+default placement walked into. Packing several small circuits side by side into one QPU job cut QPU time and
+price per circuit 8x at eight circuits per job, for an emulated fidelity loss under 0.3% before
+crosstalk, and racing a classical fallback against the QPU delivered a result within 0.6 s of every
+deadline in the live prototype.
 
 ## 1. Problem and approach
 
@@ -79,6 +82,7 @@ estimates. All modelling assumptions are in `docs/assumptions.md`.
 | E4 | Where exactly is the quantum boundary? | Decision maps over circuit size and depth for today's and better QPUs, and over a hypothetical QAOA advantage and QPU price. |
 | E5 | Does the prototype run end to end? | Real payloads through the live orchestrator, and every quantum-capable job forced through classical, simulator and QPU-emulator paths. |
 | E6 | Does routing by calibration data pay off? | 16 TFIM, QAOA and kernel circuits (4 to 12 qubits) on eight IBM devices: v1's fixed device and default qubits vs the device and qubits chosen from per-qubit calibration, scored against the ideal output. |
+| E7 | Can the QPU's fixed costs and queue risk be managed? | Packing: up to 26 small circuits side by side in one emulated job on two devices, with and without free qubits between them and under assumed crosstalk levels. Batching and race mode: 11 policy/batching variants x 5 scenarios x 3 seeds in the simulator. Live race mode: the real orchestrator racing the QPU path against the classical fallback at deadlines either side of the QPU time. |
 
 ## 3. Results
 
@@ -237,6 +241,50 @@ as designed; live hardware adds crosstalk and drift between calibrations, which 
 
 ![](figures/e6_calibration_prediction.png)
 
+### 3.7 Sharing QPU jobs and racing a classical fallback (E7)
+
+Every QPU job pays a queue wait and fixed charges, and a 4-qubit circuit uses about 3% of a 133-156 qubit
+chip. E7 tests three ways to manage that, all on top of the calibration-aware routing of 3.6.
+
+**Packing several clients' circuits into one job.** Q-Edge places each circuit on its own best region of
+the chip, optionally leaving a ring of unused qubits around each so programs never touch, runs them as one
+circuit with one set of shots, and splits the results. The chip held up to 20 4-qubit programs on Aachen
+and 18 on Torino with the free ring, or 26 and 22 without it.
+
+| 4-qubit TFIM programs, 4000 shots | alone | 8 per job | full chip |
+|---|---|---|---|
+| QPU seconds per program | 1.11 | 0.139 | 0.043 to 0.050 |
+| Braket-style price per program | $6.10 | $0.76 | $0.23 to $0.28 |
+| Programs per 10 free IBM minutes | 540 | 4321 | 11 883 to 14 043 |
+
+The cost is quality. Up to four programs per job the fidelity loss is lost in shot noise everywhere. At
+eight it is resolved only on the noisier Torino with mixed programs (0.3% without assumed crosstalk). With the chip full it reaches
+0.6-0.7% on Torino and 0.1% on Aachen with the free ring. Crosstalk is not in the emulator, so we added it
+as an assumption: multiplying the error of two-qubit gates next to another program by 2 or 5 raises the
+full-chip loss on Torino to 0.8-2.0%, and the free ring removes it by construction at the price of fewer
+programs per job. On real hardware, crosstalk and idle time while the longest program finishes would add
+to these numbers.
+
+**Batching in the scheduler.** In simulation, QPU tasks arriving within a window share a job. This only
+pays when many tasks go to the QPU: with a quantum-heavy future workload, a 30 s window cut QPU charges per
+task by 19% (shared shots; 7% under a strict all-or-nothing packing rule) while QPU tasks waited 51 s instead
+of 30 s, and a 120 s window cut 28% (1.5% under the strict rule) at 109 s. Where few tasks reach the QPU,
+windows of 30 s or less changed cost by under 0.2%. Batching never raised the deadline hit rate by more than 0.1 point.
+
+**Race mode.** When a QPU job risks its deadline, Q-Edge also runs the best classical placement and keeps
+the QPU result only if it arrives in time, cancelling the QPU job otherwise. In the simulated busy-QPU
+scenario, where the provider under-reports its queue, this lifted the deadline hit rate of QPU tasks from
+77% to 89% and cut QPU charges per task by 18%, because jobs cancelled while still queued cost nothing; the
+extra classical runs cost $0.0001 and 43 J per task. Where the provider's queue estimate is unbiased it never triggered at the default threshold.
+In the live prototype, the QPU result was delivered when it beat the deadline (twice), and otherwise the
+classical result arrived at the deadline with the QPU job cancelled (eight times). Because the emulator
+shares the machine with the fallback, delivery overshot the deadline by up to 0.55 s; on real hardware the
+QPU side is a network wait.
+
+![](figures/e7_packing_fidelity.png)
+
+![](figures/e7_qpu_cost.png)
+
 ## 4. Answer to the project question
 
 * **Run locally on the edge CPU/GPU** when the data are private, the deadline is tight relative to upload
@@ -249,6 +297,9 @@ as designed; live hardware adds crosstalk and drift between calibrations, which 
   workloads met that bar; E4 maps where future hardware would.
 * **When a QPU is used, route by calibration.** Pick the device and qubits from today's per-qubit error data,
   not a fixed device: E6 shows a 37% lower average output error and avoids broken couplers.
+* **Share and hedge QPU jobs.** Pack small circuits from several clients into one job (8x cheaper per
+  circuit at eight per job for under 0.3% fidelity in emulation), and race a classical fallback when the
+  queue might break the deadline.
 
 That conclusion is the framework working as intended. The value of Q-Edge is that the decision is explicit,
 measured and re-evaluated as hardware improves: changing three numbers in the configuration (error rate,
@@ -269,6 +320,10 @@ queue, price) moves the boundary, and the dashboard shows it moving.
   crosstalk or drift. The snapshots are from different dates (2025 to 2026), so the comparison is between
   device calibrations as published, not a same-day comparison. Device queues are only known with a live
   account; without one the router ranks on error rates alone.
+* E7's packing results come from emulators that model no crosstalk and no idle time; crosstalk enters only as
+  an assumed factor. Batching and simulated race mode use the hypothetical future QPU of E3, assume packing
+  costs no fidelity, and assume a job cancelled while queued is not charged. Live race timings share one
+  machine between both paths.
 * Small test sets in the live runs (10 to 30 points) make single-run accuracies noisy; E2 is the place for
   statistical comparison.
 
@@ -276,8 +331,8 @@ queue, price) moves the boundary, and the dashboard shows it moving.
 
 ```bash
 pip install -r requirements.txt
-pytest                                   # 73 tests
-python -m qedge experiments              # all six experiments, then REPORT.md
+pytest                                   # 138 tests
+python -m qedge experiments              # all seven experiments, then REPORT.md
 python -m qedge dashboard
 ```
 
@@ -285,7 +340,7 @@ python -m qedge dashboard
 
 # Appendix: generated result tables
 
-Generated from `results/` by `python -m qedge report`. Run settings: `{"quick": false, "python": "3.13.16", "machine": "x86_64", "versions": {"qiskit": "2.5.2", "qiskit_aer": "0.17.2", "pennylane": "0.45.1", "cirq": "1.7.0", "amazon-braket-sdk": "1.127.3.post0"}, "timings_s": {"e2": 1299.7, "e1": 362.7, "e3": 18.2, "e4": 0.4, "e5": 290.7, "e6": 1261.7}}`
+Generated from `results/` by `python -m qedge report`. Run settings: `{"quick": false, "python": "3.13.16", "machine": "x86_64", "versions": {"qiskit": "2.5.2", "qiskit_aer": "0.17.2", "pennylane": "0.45.1", "cirq": "1.7.0", "amazon-braket-sdk": "1.127.3.post0"}, "timings_s": {"e2": 1299.7, "e1": 362.7, "e3": 18.2, "e4": 0.4, "e5": 290.7, "e6": 1261.7, "e7_packing": 331.0, "e7_batching": 27.0}}`
 
 ## A1. Stack agreement and speed (E1)
 
@@ -534,4 +589,179 @@ How well each predictor tracks measured fidelity (Spearman rank correlation). 'A
 ![](figures/e6_calibration_choice.png)
 
 ![](figures/e6_calibration_prediction.png)
+
+## A9. Job packing (E7)
+
+Several small circuits share one QPU job on disjoint qubits (emulated from calibration snapshots, 4000 shots). `loss` = mean solo Hellinger fidelity minus mean packed fidelity; `loss_z` = loss over its shot-noise standard error (|z| >= 2 counts as resolved). Crosstalk factor c is an assumption, applied only where programs touch (buffer 0).
+
+| device | mix | buffer | crosstalk_factor | k | capacity | mean_fidelity_packed | mean_fidelity_solo | fidelity_loss | loss_z | programs_exposed | qpu_s_per_program | price_per_program | programs_per_free_10min |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| fake_aachen | tfim4 | 1 | 1 | 1 | 20 | 0.9985 | 0.9985 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_aachen | tfim4 | 1 | 1 | 2 | 20 | 0.9987 | 0.9985 | -0.0002045 | -0.2822 | 0 | 0.5554 | 3.05 | 1080 |
+| fake_aachen | tfim4 | 1 | 1 | 4 | 20 | 0.9991 | 0.9985 | -0.0005704 | -0.8765 | 0 | 0.2777 | 1.525 | 2160 |
+| fake_aachen | tfim4 | 1 | 1 | 8 | 20 | 0.9988 | 0.9985 | -0.0002423 | -0.3804 | 0 | 0.1389 | 0.7625 | 4321 |
+| fake_aachen | tfim4 | 1 | 1 | 20 | 20 | 0.9984 | 0.9985 | 8.944e-05 | 0.1438 | 0 | 0.05554 | 0.305 | 1.08e+04 |
+| fake_aachen | tfim4 | 0 | 1 | 1 | 26 | 0.9985 | 0.9985 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_aachen | tfim4 | 0 | 2 | 1 | 26 | 0.9985 | 0.9985 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_aachen | tfim4 | 0 | 5 | 1 | 26 | 0.9985 | 0.9985 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_aachen | tfim4 | 0 | 1 | 2 | 26 | 0.9987 | 0.9985 | -0.0002045 | -0.2822 | 0 | 0.5554 | 3.05 | 1080 |
+| fake_aachen | tfim4 | 0 | 2 | 2 | 26 | 0.9987 | 0.9985 | -0.0002045 | -0.2822 | 0 | 0.5554 | 3.05 | 1080 |
+| fake_aachen | tfim4 | 0 | 5 | 2 | 26 | 0.9987 | 0.9985 | -0.0002045 | -0.2822 | 0 | 0.5554 | 3.05 | 1080 |
+| fake_aachen | tfim4 | 0 | 1 | 4 | 26 | 0.9991 | 0.9985 | -0.0005704 | -0.8765 | 0 | 0.2777 | 1.525 | 2160 |
+| fake_aachen | tfim4 | 0 | 2 | 4 | 26 | 0.9991 | 0.9985 | -0.0005704 | -0.8765 | 0 | 0.2777 | 1.525 | 2160 |
+| fake_aachen | tfim4 | 0 | 5 | 4 | 26 | 0.9991 | 0.9985 | -0.0005704 | -0.8765 | 0 | 0.2777 | 1.525 | 2160 |
+| fake_aachen | tfim4 | 0 | 1 | 8 | 26 | 0.9988 | 0.9985 | -0.0002423 | -0.3804 | 0 | 0.1389 | 0.7625 | 4321 |
+| fake_aachen | tfim4 | 0 | 2 | 8 | 26 | 0.9988 | 0.9985 | -0.0002423 | -0.3804 | 0 | 0.1389 | 0.7625 | 4321 |
+| fake_aachen | tfim4 | 0 | 5 | 8 | 26 | 0.9988 | 0.9985 | -0.0002423 | -0.3804 | 0 | 0.1389 | 0.7625 | 4321 |
+| fake_aachen | tfim4 | 0 | 1 | 26 | 26 | 0.9984 | 0.9985 | 8.517e-05 | 0.1378 | 22 | 0.04273 | 0.2346 | 1.404e+04 |
+| fake_aachen | tfim4 | 0 | 2 | 26 | 26 | 0.9983 | 0.9985 | 0.0002333 | 0.3767 | 22 | 0.04273 | 0.2346 | 1.404e+04 |
+| fake_aachen | tfim4 | 0 | 5 | 26 | 26 | 0.9976 | 0.9985 | 0.000943 | 1.509 | 22 | 0.04273 | 0.2346 | 1.404e+04 |
+| fake_aachen | mixed | 1 | 1 | 1 | 18 | 0.9985 | 0.9985 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_aachen | mixed | 1 | 1 | 2 | 18 | 0.9957 | 0.9957 | 0 | 0 | 0 | 0.5607 | 3.05 | 1070 |
+| fake_aachen | mixed | 1 | 1 | 4 | 18 | 0.996 | 0.9966 | 0.0005736 | 0.8482 | 0 | 0.3008 | 1.525 | 1995 |
+| fake_aachen | mixed | 1 | 1 | 8 | 18 | 0.9968 | 0.9968 | -1.129e-06 | -0.002278 | 0 | 0.1504 | 0.7625 | 3989 |
+| fake_aachen | mixed | 1 | 1 | 18 | 18 | 0.9955 | 0.9969 | 0.001439 | 3.46 | 0 | 0.06685 | 0.3389 | 8975 |
+| fake_aachen | mixed | 0 | 1 | 1 | 22 | 0.9985 | 0.9985 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_aachen | mixed | 0 | 2 | 1 | 22 | 0.9985 | 0.9985 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_aachen | mixed | 0 | 5 | 1 | 22 | 0.9985 | 0.9985 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_aachen | mixed | 0 | 1 | 2 | 22 | 0.9957 | 0.9957 | 0 | 0 | 0 | 0.5607 | 3.05 | 1070 |
+| fake_aachen | mixed | 0 | 2 | 2 | 22 | 0.9957 | 0.9957 | 0 | 0 | 0 | 0.5607 | 3.05 | 1070 |
+| fake_aachen | mixed | 0 | 5 | 2 | 22 | 0.9957 | 0.9957 | 0 | 0 | 0 | 0.5607 | 3.05 | 1070 |
+| fake_aachen | mixed | 0 | 1 | 4 | 22 | 0.996 | 0.9966 | 0.0005736 | 0.8482 | 0 | 0.3008 | 1.525 | 1995 |
+| fake_aachen | mixed | 0 | 2 | 4 | 22 | 0.996 | 0.9966 | 0.0005736 | 0.8482 | 0 | 0.3008 | 1.525 | 1995 |
+| fake_aachen | mixed | 0 | 5 | 4 | 22 | 0.996 | 0.9966 | 0.0005736 | 0.8482 | 0 | 0.3008 | 1.525 | 1995 |
+| fake_aachen | mixed | 0 | 1 | 8 | 22 | 0.9968 | 0.9968 | 8.711e-05 | 0.1748 | 2 | 0.1504 | 0.7625 | 3989 |
+| fake_aachen | mixed | 0 | 2 | 8 | 22 | 0.9967 | 0.9968 | 0.0001626 | 0.3247 | 2 | 0.1504 | 0.7625 | 3989 |
+| fake_aachen | mixed | 0 | 5 | 8 | 22 | 0.9967 | 0.9968 | 0.000181 | 0.3611 | 2 | 0.1504 | 0.7625 | 3989 |
+| fake_aachen | mixed | 0 | 1 | 22 | 22 | 0.9958 | 0.9969 | 0.001188 | 3.013 | 19 | 0.05469 | 0.2773 | 1.097e+04 |
+| fake_aachen | mixed | 0 | 2 | 22 | 22 | 0.9953 | 0.9969 | 0.001679 | 4.185 | 19 | 0.05469 | 0.2773 | 1.097e+04 |
+| fake_aachen | mixed | 0 | 5 | 22 | 22 | 0.9933 | 0.9969 | 0.003602 | 8.43 | 19 | 0.05469 | 0.2773 | 1.097e+04 |
+| fake_torino | tfim4 | 1 | 1 | 1 | 18 | 0.9972 | 0.9972 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_torino | tfim4 | 1 | 1 | 2 | 18 | 0.9973 | 0.9972 | -0.0001064 | -0.1046 | 0 | 0.5554 | 3.05 | 1080 |
+| fake_torino | tfim4 | 1 | 1 | 4 | 18 | 0.9975 | 0.9972 | -0.0003401 | -0.3683 | 0 | 0.2777 | 1.525 | 2160 |
+| fake_torino | tfim4 | 1 | 1 | 8 | 18 | 0.9964 | 0.9972 | 0.0007475 | 0.8307 | 0 | 0.1389 | 0.7625 | 4321 |
+| fake_torino | tfim4 | 1 | 1 | 18 | 18 | 0.9911 | 0.9972 | 0.006101 | 6.733 | 0 | 0.06172 | 0.3389 | 9722 |
+| fake_torino | tfim4 | 0 | 1 | 1 | 22 | 0.9972 | 0.9972 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_torino | tfim4 | 0 | 2 | 1 | 22 | 0.9972 | 0.9972 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_torino | tfim4 | 0 | 5 | 1 | 22 | 0.9972 | 0.9972 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_torino | tfim4 | 0 | 1 | 2 | 22 | 0.9973 | 0.9972 | -0.0001064 | -0.1046 | 0 | 0.5554 | 3.05 | 1080 |
+| fake_torino | tfim4 | 0 | 2 | 2 | 22 | 0.9973 | 0.9972 | -0.0001064 | -0.1046 | 0 | 0.5554 | 3.05 | 1080 |
+| fake_torino | tfim4 | 0 | 5 | 2 | 22 | 0.9973 | 0.9972 | -0.0001064 | -0.1046 | 0 | 0.5554 | 3.05 | 1080 |
+| fake_torino | tfim4 | 0 | 1 | 4 | 22 | 0.9975 | 0.9972 | -0.0003401 | -0.3683 | 0 | 0.2777 | 1.525 | 2160 |
+| fake_torino | tfim4 | 0 | 2 | 4 | 22 | 0.9975 | 0.9972 | -0.0003401 | -0.3683 | 0 | 0.2777 | 1.525 | 2160 |
+| fake_torino | tfim4 | 0 | 5 | 4 | 22 | 0.9975 | 0.9972 | -0.0003401 | -0.3683 | 0 | 0.2777 | 1.525 | 2160 |
+| fake_torino | tfim4 | 0 | 1 | 8 | 22 | 0.9964 | 0.9972 | 0.0007475 | 0.8307 | 0 | 0.1389 | 0.7625 | 4321 |
+| fake_torino | tfim4 | 0 | 2 | 8 | 22 | 0.9964 | 0.9972 | 0.0007475 | 0.8307 | 0 | 0.1389 | 0.7625 | 4321 |
+| fake_torino | tfim4 | 0 | 5 | 8 | 22 | 0.9964 | 0.9972 | 0.0007475 | 0.8307 | 0 | 0.1389 | 0.7625 | 4321 |
+| fake_torino | tfim4 | 0 | 1 | 22 | 22 | 0.9915 | 0.9972 | 0.00574 | 6.438 | 18 | 0.05049 | 0.2773 | 1.188e+04 |
+| fake_torino | tfim4 | 0 | 2 | 22 | 22 | 0.9893 | 0.9972 | 0.007922 | 8.754 | 18 | 0.05049 | 0.2773 | 1.188e+04 |
+| fake_torino | tfim4 | 0 | 5 | 22 | 22 | 0.9805 | 0.9972 | 0.01672 | 17.5 | 18 | 0.05049 | 0.2773 | 1.188e+04 |
+| fake_torino | mixed | 1 | 1 | 1 | 14 | 0.9972 | 0.9972 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_torino | mixed | 1 | 1 | 2 | 14 | 0.991 | 0.9918 | 0.0008025 | 0.5515 | 0 | 0.5607 | 3.05 | 1070 |
+| fake_torino | mixed | 1 | 1 | 4 | 14 | 0.9914 | 0.9924 | 0.0009366 | 0.9348 | 0 | 0.3008 | 1.525 | 1995 |
+| fake_torino | mixed | 1 | 1 | 8 | 14 | 0.99 | 0.993 | 0.002933 | 3.618 | 0 | 0.1504 | 0.7625 | 3989 |
+| fake_torino | mixed | 1 | 1 | 14 | 14 | 0.9857 | 0.9923 | 0.006654 | 9.073 | 0 | 0.08595 | 0.4357 | 6981 |
+| fake_torino | mixed | 0 | 1 | 1 | 18 | 0.9972 | 0.9972 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_torino | mixed | 0 | 2 | 1 | 18 | 0.9972 | 0.9972 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_torino | mixed | 0 | 5 | 1 | 18 | 0.9972 | 0.9972 | 0 | 0 | 0 | 1.111 | 6.1 | 540.1 |
+| fake_torino | mixed | 0 | 1 | 2 | 18 | 0.9917 | 0.9918 | 8.63e-05 | 0.06059 | 1 | 0.5607 | 3.05 | 1070 |
+| fake_torino | mixed | 0 | 2 | 2 | 18 | 0.9915 | 0.9918 | 0.0003514 | 0.2447 | 1 | 0.5607 | 3.05 | 1070 |
+| fake_torino | mixed | 0 | 5 | 2 | 18 | 0.9903 | 0.9918 | 0.0015 | 1.01 | 1 | 0.5607 | 3.05 | 1070 |
+| fake_torino | mixed | 0 | 1 | 4 | 18 | 0.9917 | 0.9924 | 0.0006913 | 0.6953 | 1 | 0.3008 | 1.525 | 1995 |
+| fake_torino | mixed | 0 | 2 | 4 | 18 | 0.9913 | 0.9924 | 0.001024 | 1.019 | 1 | 0.3008 | 1.525 | 1995 |
+| fake_torino | mixed | 0 | 5 | 4 | 18 | 0.9906 | 0.9924 | 0.001751 | 1.706 | 1 | 0.3008 | 1.525 | 1995 |
+| fake_torino | mixed | 0 | 1 | 8 | 18 | 0.9902 | 0.993 | 0.002823 | 3.492 | 5 | 0.1504 | 0.7625 | 3989 |
+| fake_torino | mixed | 0 | 2 | 8 | 18 | 0.9892 | 0.993 | 0.003738 | 4.527 | 5 | 0.1504 | 0.7625 | 3989 |
+| fake_torino | mixed | 0 | 5 | 8 | 18 | 0.9856 | 0.993 | 0.007379 | 8.295 | 5 | 0.1504 | 0.7625 | 3989 |
+| fake_torino | mixed | 0 | 1 | 18 | 18 | 0.9821 | 0.9925 | 0.01036 | 14.36 | 16 | 0.06685 | 0.3389 | 8975 |
+| fake_torino | mixed | 0 | 2 | 18 | 18 | 0.98 | 0.9925 | 0.01248 | 16.86 | 16 | 0.06685 | 0.3389 | 8975 |
+| fake_torino | mixed | 0 | 5 | 18 | 18 | 0.9721 | 0.9925 | 0.02036 | 25.22 | 16 | 0.06685 | 0.3389 | 8975 |
+
+![](figures/e7_packing_fidelity.png)
+
+![](figures/e7_packing_cost.png)
+
+## A10. Batching and hedged race mode in simulation (E7)
+
+800 tasks x 3 seeds per row; QPU figures are the hypothetical future QPU of E3. `-allfit` is the strict rule (all members side by side or all back to back); plain batch rows pack the subset that fits and run the rest back to back. Packing is assumed to cost no fidelity here.
+
+| scenario | variant | qpu_tasks_per_run | qpu_jobs_per_run | mean_batch_size | qpu_cost_per_qpu_task | d_qpu_cost_per_qpu_task_pct | deadline_hit_rate | d_deadline_hit_pp | qpu_deadline_hit_rate | qpu_mean_latency_s | hedge_rate | fallback_win_rate | wasted_cost_usd_per_task | wasted_energy_j_per_task |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| future_qpu | adaptive | 15 | 15 | 1 | 2.93 | 0 | 0.9454 | 0 | 1 | 34.57 | 0 | - | 0 | 0 |
+| future_qpu | adaptive+batch5 | 15 | 14.67 | 1.023 | 2.929 | -0.02275 | 0.9454 | 0 | 1 | 35.06 | 0 | - | 0 | 0 |
+| future_qpu | adaptive+batch30 | 15 | 13 | 1.154 | 2.926 | -0.1365 | 0.9454 | 0 | 1 | 56.36 | 0 | - | 0 | 0 |
+| future_qpu | adaptive+batch120 | 13.33 | 10 | 1.333 | 2.705 | -7.679 | 0.9437 | -0.1667 | 0.975 | 137.4 | 0 | - | 0 | 0 |
+| future_qpu | adaptive+batch5-allfit | 15 | 14.67 | 1.023 | 2.929 | -0.02275 | 0.9454 | 0 | 1 | 35.06 | 0 | - | 0 | 0 |
+| future_qpu | adaptive+batch30-allfit | 15 | 13 | 1.154 | 2.926 | -0.1365 | 0.9454 | 0 | 1 | 56.36 | 0 | - | 0 | 0 |
+| future_qpu | adaptive+batch120-allfit | 13.33 | 10 | 1.333 | 2.85 | -2.73 | 0.9437 | -0.1667 | 0.975 | 138.4 | 0 | - | 0 | 0 |
+| future_qpu | adaptive+batch30-seq | 15 | 13 | 1.154 | 2.926 | -0.1365 | 0.9454 | 0 | 1 | 56.36 | 0 | - | 0 | 0 |
+| future_qpu | adaptive+batch30-blind | 15 | 13 | 1.154 | 2.926 | -0.1365 | 0.9454 | 0 | 1 | 56.36 | 0 | - | 0 | 0 |
+| future_qpu | hedged | 15 | 15 | 1 | 2.93 | 0 | 0.9454 | 0 | 1 | 34.57 | 0 | - | 0 | 0 |
+| future_qpu_busy | adaptive | 8.667 | 8.667 | 1 | 2.93 | 0 | 0.94 | 0 | 0.7692 | 881.2 | 0 | - | 0 | 0 |
+| future_qpu_busy | adaptive+batch5 | 8 | 7.667 | 1.043 | 2.929 | -0.04266 | 0.9404 | 0.04167 | 0.75 | 935 | 0 | - | 0 | 0 |
+| future_qpu_busy | adaptive+batch30 | 7.333 | 7 | 1.048 | 2.929 | -0.04654 | 0.94 | 0 | 0.7273 | 1017 | 0 | - | 0 | 0 |
+| future_qpu_busy | adaptive+batch120 | 6 | 5.333 | 1.125 | 2.766 | -5.612 | 0.9408 | 0.08333 | 0.7778 | 1034 | 0 | - | 0 | 0 |
+| future_qpu_busy | adaptive+batch5-allfit | 8 | 7.667 | 1.043 | 2.929 | -0.04266 | 0.9404 | 0.04167 | 0.75 | 935 | 0 | - | 0 | 0 |
+| future_qpu_busy | adaptive+batch30-allfit | 7.333 | 7 | 1.048 | 2.929 | -0.04654 | 0.94 | 0 | 0.7273 | 1017 | 0 | - | 0 | 0 |
+| future_qpu_busy | adaptive+batch120-allfit | 6 | 5.333 | 1.125 | 2.766 | -5.612 | 0.9408 | 0.08333 | 0.7778 | 1034 | 0 | - | 0 | 0 |
+| future_qpu_busy | adaptive+batch30-seq | 7.333 | 7 | 1.048 | 2.929 | -0.04654 | 0.94 | 0 | 0.7273 | 1017 | 0 | - | 0 | 0 |
+| future_qpu_busy | adaptive+batch30-blind | 9 | 8.333 | 1.08 | 2.928 | -0.07584 | 0.9396 | -0.04167 | 0.7407 | 922.7 | 0 | - | 0 | 0 |
+| future_qpu_busy | hedged | 9.333 | 9.333 | 1 | 2.407 | -17.86 | 0.9413 | 0.125 | 0.8929 | 568.1 | 0.6071 | 0.2941 | 9.936e-05 | 43.17 |
+| future_qpu_heavy_tail | adaptive | 15 | 15 | 1 | 2.93 | 0 | 0.9483 | 0 | 0.9778 | 29.7 | 0 | - | 0 | 0 |
+| future_qpu_heavy_tail | adaptive+batch5 | 15 | 14.67 | 1.023 | 2.929 | -0.02275 | 0.9483 | 0 | 0.9778 | 30.07 | 0 | - | 0 | 0 |
+| future_qpu_heavy_tail | adaptive+batch30 | 15 | 13 | 1.154 | 2.926 | -0.1365 | 0.9483 | 0 | 0.9778 | 51.67 | 0 | - | 0 | 0 |
+| future_qpu_heavy_tail | adaptive+batch120 | 13.33 | 10 | 1.333 | 2.705 | -7.679 | 0.9475 | -0.08333 | 1 | 132.1 | 0 | - | 0 | 0 |
+| future_qpu_heavy_tail | adaptive+batch5-allfit | 15 | 14.67 | 1.023 | 2.929 | -0.02275 | 0.9483 | 0 | 0.9778 | 30.07 | 0 | - | 0 | 0 |
+| future_qpu_heavy_tail | adaptive+batch30-allfit | 15 | 13 | 1.154 | 2.926 | -0.1365 | 0.9483 | 0 | 0.9778 | 51.67 | 0 | - | 0 | 0 |
+| future_qpu_heavy_tail | adaptive+batch120-allfit | 13.33 | 10 | 1.333 | 2.85 | -2.73 | 0.9475 | -0.08333 | 1 | 133 | 0 | - | 0 | 0 |
+| future_qpu_heavy_tail | adaptive+batch30-seq | 15 | 13 | 1.154 | 2.926 | -0.1365 | 0.9483 | 0 | 0.9778 | 51.67 | 0 | - | 0 | 0 |
+| future_qpu_heavy_tail | adaptive+batch30-blind | 15 | 13 | 1.154 | 2.926 | -0.1365 | 0.9483 | 0 | 0.9778 | 51.67 | 0 | - | 0 | 0 |
+| future_qpu_heavy_tail | hedged | 15 | 15 | 1 | 2.93 | 0 | 0.9483 | 0 | 0.9778 | 29.7 | 0 | - | 0 | 0 |
+| quantum_heavy_future | adaptive | 54.67 | 54.67 | 1 | 2.93 | 0 | 0.9663 | 0 | 0.9817 | 30.38 | 0 | - | 0 | 0 |
+| quantum_heavy_future | adaptive+batch5 | 54.33 | 45 | 1.207 | 2.765 | -5.641 | 0.9658 | -0.04167 | 0.9816 | 31.24 | 0 | - | 0 | 0 |
+| quantum_heavy_future | adaptive+batch30 | 53 | 23 | 2.304 | 2.384 | -18.63 | 0.9646 | -0.1667 | 0.9937 | 50.87 | 0 | - | 0 | 0 |
+| quantum_heavy_future | adaptive+batch120 | 50.33 | 9.667 | 5.207 | 2.099 | -28.36 | 0.9629 | -0.3333 | 0.9934 | 108.5 | 0 | - | 0 | 0 |
+| quantum_heavy_future | adaptive+batch5-allfit | 54.33 | 45 | 1.207 | 2.8 | -4.426 | 0.9658 | -0.04167 | 0.9816 | 31.63 | 0 | - | 0 | 0 |
+| quantum_heavy_future | adaptive+batch30-allfit | 53 | 23 | 2.304 | 2.712 | -7.427 | 0.9646 | -0.1667 | 0.9937 | 53.71 | 0 | - | 0 | 0 |
+| quantum_heavy_future | adaptive+batch120-allfit | 49.67 | 9.667 | 5.138 | 2.886 | -1.489 | 0.9625 | -0.375 | 0.9933 | 119.1 | 0 | - | 0 | 0 |
+| quantum_heavy_future | adaptive+batch30-seq | 52.33 | 22.33 | 2.343 | 2.913 | -0.5869 | 0.9646 | -0.1667 | 1 | 54.68 | 0 | - | 0 | 0 |
+| quantum_heavy_future | adaptive+batch30-blind | 52.67 | 22.33 | 2.358 | 2.38 | -18.76 | 0.9646 | -0.1667 | 0.9937 | 51.05 | 0 | - | 0 | 0 |
+| quantum_heavy_future | hedged | 54.67 | 54.67 | 1 | 2.93 | 0 | 0.9663 | 0 | 0.9817 | 30.38 | 0 | - | 0 | 0 |
+| future_qpu | hedged+batch120 | 13.33 | 10 | 1.333 | 2.705 | -7.679 | 0.9437 | -0.1667 | 0.975 | 137.4 | 0 | - | 0 | 0 |
+| future_qpu_busy | hedged+batch120 | 6 | 5.333 | 1.125 | 2.442 | -16.67 | 0.9417 | 0.1667 | 0.8889 | 861.6 | 0.4444 | 0.25 | 4.867e-05 | 20.79 |
+| future_qpu_heavy_tail | hedged+batch120 | 13.33 | 10 | 1.333 | 2.705 | -7.679 | 0.9475 | -0.08333 | 1 | 132.1 | 0 | - | 0 | 0 |
+| quantum_heavy_future | hedged+batch120 | 50.33 | 9.667 | 5.207 | 2.099 | -28.36 | 0.9629 | -0.3333 | 0.9934 | 108.5 | 0 | - | 0 | 0 |
+
+On `baseline` every variant gives the same result (no task reaches the QPU).
+
+
+![](figures/e7_qpu_cost.png)
+
+![](figures/e7_deadline_hit.png)
+
+## A11. Live race mode (E7)
+
+Real orchestrator, QPU path forced onto `ibm-auto` (local emulator of the best snapshot device), classical fallback run at the same time. Times are wall-clock seconds from submission.
+
+| scenario | run | deadline_s | fallback | winner | quantum_status | delivered_s | overshoot_s | classical_wall_s | quantum_wall_s | qpu_ran_before_cancel_s | delivered_quality |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| qsim_short | 0 | 3 | edge_gpu | classical | cancelled | 3.005 | 0.005497 | 0.06559 | 6.033 | 2.948 | 1 |
+| qsim_long | 0 | 60 | edge_gpu | quantum | completed | 6.744 | 0 | 0.07131 | 6.744 | - | 0.9849 |
+| qsim_long_warm | 0 | 5 | edge_gpu | quantum | completed | 1.719 | 0 | 0.06069 | 1.719 | - | 0.9868 |
+| qaoa_mid | 0 | 15 | edge_cpu | classical | cancelled | 15.02 | 0.02299 | 0.07878 | 16.47 | 14.97 | 1 |
+| qaoa_repeat | 0 | 6 | edge_cpu | classical | cancelled | 6.035 | 0.03537 | 0.074 | 7.36 | 5.978 | 1 |
+| qaoa_repeat | 1 | 6 | edge_gpu | classical | cancelled | 6.009 | 0.009483 | 0.0713 | 7.202 | 5.953 | 1 |
+| qaoa_repeat | 2 | 6 | edge_gpu | classical | cancelled | 6.007 | 0.007262 | 0.07007 | 6.862 | 5.951 | 1 |
+| qaoa_repeat | 3 | 6 | edge_cpu | classical | cancelled | 6.005 | 0.005453 | 0.07763 | 7.435 | 5.948 | 1 |
+| qaoa_repeat | 4 | 6 | edge_cpu | classical | cancelled | 6.547 | 0.5469 | 0.07039 | 6.578 | 6.49 | 1 |
+| qaoa_repeat | 5 | 6 | edge_cpu | classical | cancelled | 6.15 | 0.15 | 0.07003 | 6.184 | 6.095 | 1 |
+
+How late a timed 50 ms wait wakes up (ms), idle vs while the emulator runs in another thread on the same machine:
+
+| condition | samples | median | p95 | max |
+|---|---|---|---|---|
+| emulator running | 180 | 5.46 | 735.6 | 861.1 |
+| idle | 60 | 0.1677 | 0.3827 | 0.639 |
+
+![](figures/e7_race.png)
 

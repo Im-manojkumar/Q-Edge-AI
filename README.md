@@ -15,12 +15,14 @@ Minor project, Department of AI & Data Science (Batch 20): Manoj Kumar P, Ayaan 
 | Unified quantum layer | `qedge/quantum/` | One circuit format, translated to **Qiskit, PennyLane, Cirq and Amazon Braket**. Same circuits, same noise model, same bit order, so the stacks can be compared directly. |
 | Real hardware adapters | `qedge/quantum/backends/ibm_backend.py`, `braket_backend.py` | IBM Quantum (Qiskit Runtime SamplerV2) and Amazon Braket devices using your own credentials; fall back to a local IBM-device emulator when none are set. |
 | Calibration-aware routing | `qedge/quantum/calibration.py`, `CalibratedIBMBackend` | Reads per-qubit error rates and queue lengths for every IBM device (free, no QPU time), picks the device and physical qubits with the highest estimated success probability, feeds per-workload error figures to the cost model, detects drift, and logs live traces for the simulator. Uses calibration snapshots of 8 real IBM devices when no account is set. |
+| Job packing | `qedge/quantum/packing.py` | Runs several small circuits from different clients side by side in one QPU job on the best free qubit regions, optionally with a free-qubit ring between them, and splits the results: one queue wait, one task fee and one set of shots shared. |
+| Race mode | `Orchestrator.submit(..., race=True)`, `qedge/quantum/backends/base.py` | Runs the best classical placement next to a QPU job, delivers the QPU result only if it beats the deadline, and cancels the QPU job otherwise (real cancellation on IBM; emulators stop at the next circuit). |
 | Hybrid algorithms | `qedge/quantum/algorithms.py` | QAOA for MaxCut, quantum-kernel SVM, Trotterised spin-chain simulation, written once for every stack. |
 | Workloads | `qedge/workloads.py` | Inference, training, optimisation, kernel classification, quantum simulation, with compute, data, deadline, privacy and quantum-circuit profiles. |
 | Decision engine | `qedge/orchestrator/` | Cost model (latency, edge energy, total energy, money, quality), hard constraints, an explicit **quantum-benefit gate**, a weighted score, and a feedback loop that learns where reality differs from the model. |
 | Live prototype | `qedge/orchestrator/engine.py`, `qedge/executor.py` | Profile, monitor, decide, execute the real payload, evaluate, feed back. |
-| Simulation environment | `qedge/simulation/simulator.py` | Discrete-event simulator with hidden "true" conditions and 7 scenarios. |
-| Experiments | `qedge/experiments/` | E1 stacks, E2 quantum vs classical, E3 policies, E4 decision boundaries, E5 live runs, E6 calibration-aware routing. |
+| Simulation environment | `qedge/simulation/simulator.py` | Discrete-event simulator with hidden "true" conditions, 7 scenarios plus 2 future-QPU stress scenarios, optional QPU job batching and a hedged (race-mode) policy. |
+| Experiments | `qedge/experiments/` | E1 stacks, E2 quantum vs classical, E3 policies, E4 decision boundaries, E5 live runs, E6 calibration-aware routing, E7 job packing, batching and race mode. |
 | Dashboard | `dashboard/app.py` | Streamlit: plan/run a workload, see why, run simulations, explore what-if maps, browse results. |
 | Report | `REPORT.md` | Research-style write-up of the results (narrative source in `docs/narrative.md`, tables generated from `results/`). |
 
@@ -34,12 +36,15 @@ python -m qedge status                                # which stacks / devices a
 python -m qedge submit optimization n=8               # plan + run one workload, with the reasoning
 python -m qedge submit quantum_simulation n=8 steps=4 --force cloud_cpu+qpu   # force the QPU path
 python -m qedge simulate --scenario network_congested # compare 7 policies in simulation
-python -m qedge experiments --quick                   # all experiments, small sizes (minutes)
+python -m qedge experiments --quick                   # all seven experiments, small sizes (minutes)
 python -m qedge experiments                           # full run (longer), rebuilds REPORT.md
+python -m qedge pack quantum_simulation n=4 steps=2 --copies 8   # 8 circuits in one QPU job
+python -m qedge submit quantum_simulation n=8 steps=3 --force cloud_cpu+qpu --race --deadline 5   # race mode
+python -m qedge simulate --scenario quantum_heavy_future --batch-window 30 --hedge          # batching + hedging
 python -m qedge calibration show                      # error rates of every IBM device (live or snapshot)
 python -m qedge calibration pick quantum_simulation n=8 steps=3   # which device and qubits, and why
 python -m qedge dashboard                             # opens the dashboard in your browser
-pytest                                                # 73 tests
+pytest                                                # 138 tests
 ```
 
 ## Using real quantum hardware
@@ -88,7 +93,8 @@ cannot burn a month of free minutes or a large bill. QAOA uses 8 optimiser itera
 `python -m qedge dashboard` opens six tabs: plan and run one workload (with every placement's predicted
 latency, energy, cost, quality and the quantum-gate checks), run the simulation, a what-if map for QPU
 hardware figures, the experiment results, provider status, and calibration (device error rates, the device
-and qubits chosen for a workload, IBM's error map, and drift from logged traces).
+and qubits chosen for a workload, a map of the chosen qubits, and drift from logged traces). The orchestrator
+tab has a race-mode switch, and the simulation tab offers QPU batching windows and the hedged policy.
 
 ![Orchestrator tab](docs/dashboard_orchestrator.png)
 

@@ -8,7 +8,7 @@ import time
 
 import pandas as pd
 
-from . import e1_stacks, e2_quantum_vs_classical, e3_e4_e5, e6_calibration, figures
+from . import e1_stacks, e2_quantum_vs_classical, e3_e4_e5, e6_calibration, e7_batching, e7_packing, e7_race, figures
 
 
 def save(frames: dict[str, pd.DataFrame], out_dir: str):
@@ -27,6 +27,7 @@ def main(quick: bool = False, only: list[str] | None = None, out_dir: str = "res
         "e4": e3_e4_e5.e4,
         "e5": lambda: e3_e4_e5.e5(quick, qpu_stack),
         "e6": lambda: e6_calibration.run(quick),
+        "e7": lambda: {**e7_packing.run(quick), **e7_batching.run(quick), **e7_race.run(quick)},
     }
     meta = {"quick": quick, "python": platform.python_version(), "machine": platform.machine(),
             "processor": platform.processor(), "started": time.strftime("%Y-%m-%d %H:%M:%S")}
@@ -53,6 +54,8 @@ def main(quick: bool = False, only: list[str] | None = None, out_dir: str = "res
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     figures.make_all(out_dir, fig_dir)
+    for mod in (e7_packing, e7_batching, e7_race):
+        mod.make_figures(out_dir, fig_dir)
 
 
 if __name__ == "__main__":

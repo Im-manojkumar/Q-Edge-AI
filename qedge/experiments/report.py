@@ -134,6 +134,45 @@ def build(path: str = "REPORT.md", narrative: str = "docs/narrative.md"):
                          "circuit' asks whether it ranks the devices correctly, which is what routing needs:\n")
             parts.append(_md(pr))
         parts.append("\n![](figures/e6_calibration_choice.png)\n\n![](figures/e6_calibration_prediction.png)\n")
+    pk = _r("e7_packing_summary.csv")
+    if pk is not None:
+        parts.append("## A9. Job packing (E7)\n")
+        parts.append("Several small circuits share one QPU job on disjoint qubits (emulated from calibration snapshots, "
+                     "4000 shots). `loss` = mean solo Hellinger fidelity minus mean packed fidelity; `loss_z` = loss "
+                     "over its shot-noise standard error (|z| >= 2 counts as resolved). Crosstalk factor c is an "
+                     "assumption, applied only where programs touch (buffer 0).\n")
+        cols = ["device", "mix", "buffer", "crosstalk_factor", "k", "capacity", "mean_fidelity_packed",
+                "mean_fidelity_solo", "fidelity_loss", "loss_z", "programs_exposed", "qpu_s_per_program",
+                "price_per_program", "programs_per_free_10min"]
+        parts.append(_md(pk[[c for c in cols if c in pk.columns]], ".4g"))
+        parts.append("\n![](figures/e7_packing_fidelity.png)\n\n![](figures/e7_packing_cost.png)\n")
+    bt = _r("e7_batching_summary.csv")
+    if bt is not None:
+        parts.append("## A10. Batching and hedged race mode in simulation (E7)\n")
+        parts.append("800 tasks x 3 seeds per row; QPU figures are the hypothetical future QPU of E3. `-allfit` is the "
+                     "strict rule (all members side by side or all back to back); plain batch rows pack the subset "
+                     "that fits and run the rest back to back. Packing is assumed to cost no fidelity here.\n")
+        cols = ["scenario", "variant", "qpu_tasks_per_run", "qpu_jobs_per_run", "mean_batch_size",
+                "qpu_cost_per_qpu_task", "d_qpu_cost_per_qpu_task_pct", "deadline_hit_rate", "d_deadline_hit_pp",
+                "qpu_deadline_hit_rate", "qpu_mean_latency_s", "hedge_rate", "fallback_win_rate",
+                "wasted_cost_usd_per_task", "wasted_energy_j_per_task"]
+        parts.append(_md(bt[bt.scenario != "baseline"][[c for c in cols if c in bt.columns]], ".4g"))
+        parts.append("\nOn `baseline` every variant gives the same result (no task reaches the QPU).\n")
+        parts.append("\n![](figures/e7_qpu_cost.png)\n\n![](figures/e7_deadline_hit.png)\n")
+    rc = _r("race_demo.csv")
+    if rc is not None:
+        parts.append("## A11. Live race mode (E7)\n")
+        parts.append("Real orchestrator, QPU path forced onto `ibm-auto` (local emulator of the best snapshot device), "
+                     "classical fallback run at the same time. Times are wall-clock seconds from submission.\n")
+        cols = ["scenario", "run", "deadline_s", "fallback", "winner", "quantum_status", "delivered_s",
+                "overshoot_s", "classical_wall_s", "quantum_wall_s", "qpu_ran_before_cancel_s", "delivered_quality"]
+        parts.append(_md(rc[[c for c in cols if c in rc.columns]], ".4g"))
+        lag = _r("race_gil_lag.csv")
+        if lag is not None:
+            parts.append("\nHow late a timed 50 ms wait wakes up (ms), idle vs while the emulator runs in another "
+                         "thread on the same machine:\n")
+            parts.append(_md(lag, ".4g"))
+        parts.append("\n![](figures/e7_race.png)\n")
     with open(path, "w") as f:
         f.write("\n".join(parts) + "\n")
     return path

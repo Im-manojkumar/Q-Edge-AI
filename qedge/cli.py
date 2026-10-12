@@ -33,15 +33,29 @@ def main(argv=None):
                    help="ibm-auto picks device and qubits from calibration (default)")
     s.add_argument("--force", help="run this placement instead, e.g. cloud_cpu+qpu")
     s.add_argument("--plan-only", action="store_true", help="decide but do not execute")
+    s.add_argument("--race", action="store_true",
+                   help="if the QPU is used, run the best classical placement at the same time and deliver the QPU "
+                        "result only if it arrives before the deadline")
+    s.add_argument("--deadline", type=float, help="deadline in seconds (also the race deadline)")
 
     m = sub.add_parser("simulate", help="discrete-event comparison of policies")
     m.add_argument("--scenario", default="baseline")
     m.add_argument("--tasks", type=int, default=600)
     m.add_argument("--seed", type=int, default=0)
+    m.add_argument("--batch-window", type=float, help="group QPU tasks into shared jobs within this many seconds")
+    m.add_argument("--max-batch", type=int, default=8, help="most tasks per shared QPU job")
+    m.add_argument("--hedge", action="store_true", help="also run qedge_hedged (race mode with classical fallback)")
 
-    e = sub.add_parser("experiments", help="run E1-E6 and regenerate figures")
+    k = sub.add_parser("pack", help="run several copies of a small circuit workload side by side in one QPU job")
+    k.add_argument("kind", choices=["quantum_simulation"])
+    k.add_argument("params", nargs="*", help="key=value, e.g. n=4 steps=2")
+    k.add_argument("--copies", type=int, default=4)
+    k.add_argument("--buffer", type=int, default=1, choices=[0, 1], help="1 leaves a free qubit ring around each program")
+    k.add_argument("--shots", type=int, default=4000)
+
+    e = sub.add_parser("experiments", help="run E1-E7 and regenerate figures")
     e.add_argument("--quick", action="store_true")
-    e.add_argument("--only", nargs="*", choices=["e1", "e2", "e3", "e4", "e5", "e6"])
+    e.add_argument("--only", nargs="*", choices=["e1", "e2", "e3", "e4", "e5", "e6", "e7"])
     e.add_argument("--qpu-stack", default="ibm-auto")
 
     c = sub.add_parser("calibration", help="calibration-aware routing: devices, qubit choice, live logging, drift")
@@ -69,14 +83,22 @@ def main(argv=None):
             _, d = orch.plan(a.kind, **_params(a.params))
             print(d.explain())
         else:
-            print(orch.submit(a.kind, force=a.force, **_params(a.params)).explain())
+            params = _params(a.params)
+            rep = orch.submit(a.kind, force=a.force, race=a.race, deadline_s=a.deadline, **params)
+            print(rep.explain())
+            if rep.race is not None and rep.raced:
+                rep.race.wait_settled()  # an abandoned emulator thread finishes before we exit
+                print("  final: " + rep.race.summary())
     elif a.cmd == "simulate":
         import pandas as pd
         from .orchestrator.policies import POLICIES
         from .simulation.simulator import Simulator, summarise
-        sim = Simulator(a.scenario, seed=a.seed)
+        from .simulation.simulator import BatchConfig
+        batching = BatchConfig(a.batch_window, a.max_batch) if a.batch_window else None
+        sim = Simulator(a.scenario, seed=a.seed, batching=batching)
         wl = sim.workloads(a.tasks)
-        df = pd.concat([sim.run(p, wl) for p in POLICIES])
+        names = list(POLICIES) + (["qedge_hedged"] if a.hedge else [])
+        df = pd.concat([sim.run(p, wl) for p in names])
         with pd.option_context("display.width", 200, "display.max_columns", 20):
             print(summarise(df).drop(columns=["scenario"]).round(3).to_string(index=False))
     elif a.cmd == "experiments":
@@ -84,6 +106,23 @@ def main(argv=None):
         run_all(a.quick, a.only, qpu_stack=a.qpu_stack)
         from .experiments.report import build
         build()
+    elif a.cmd == "pack":
+        import numpy as np
+        import pandas as pd
+
+        from .quantum.backends import get_backend
+        from .quantum.packing import run_packed_workloads
+        from .workloads import BUILDERS
+        ws = [BUILDERS[a.kind](i, np.random.default_rng(i), **_params(a.params)) for i in range(a.copies)]
+        run = run_packed_workloads(get_backend("ibm-auto"), ws, shots=a.shots, buffer=a.buffer)
+        with pd.option_context("display.width", 200, "display.max_colwidth", 40):
+            print(pd.DataFrame(run.results).round(4).to_string(index=False))
+        c = run.cost
+        print(f"\n{len(run.results)} programs in one {'emulated ' if run.emulated else ''}job on {run.device}: "
+              f"{c.qpu_s_per_program:.3g} QPU-s and ${c.price_per_program:.3g} per program "
+              f"(alone: {c.qpu_s_per_program_solo:.3g} QPU-s, ${c.price_per_program_solo:.3g})")
+        if run.unplaced or run.skipped:
+            print(f"not packed: {run.unplaced or ''} {run.skipped or ''}")
     elif a.cmd == "calibration":
         _calibration(a)
     elif a.cmd == "report":

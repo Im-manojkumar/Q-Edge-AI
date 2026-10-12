@@ -16,10 +16,10 @@ sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
 from qedge.orchestrator.engine import Orchestrator  # noqa: E402
-from qedge.orchestrator.policies import POLICIES, QEdgeAdaptivePolicy, QEdgeCostPolicy, Weights  # noqa: E402
+from qedge.orchestrator.policies import EXTRA_POLICIES, POLICIES, QEdgeAdaptivePolicy, QEdgeCostPolicy, Weights  # noqa: E402
 from qedge.quantum.backends import provider_status  # noqa: E402
 from qedge.resources import ResourceState, load_catalogue, scale  # noqa: E402
-from qedge.simulation.simulator import SCENARIOS, Simulator, summarise  # noqa: E402
+from qedge.simulation.simulator import EXTRA_SCENARIOS, SCENARIOS, BatchConfig, Simulator, get_scenario, summarise  # noqa: E402
 from qedge.workloads import KINDS, load_calibration, make_qsim  # noqa: E402
 
 st.set_page_config(page_title="Q-Edge AI", layout="wide")
@@ -117,9 +117,16 @@ with tabs[0]:
     force = st.selectbox("Placement to execute", ["(the decision)"] + [e.placement.label for e in d.estimates])
     big = (kind == "quantum_simulation" and params["n"] > 20) or (kind == "optimization" and params["n"] > 16 and
                                                                    "+" in (force if force != "(the decision)" else d.placement.label))
+    rc1, rc2 = st.columns(2)
+    race = rc1.checkbox("Race mode", help="If this runs on the QPU, run the best classical placement at the same time "
+                                          "and keep the QPU result only if it arrives before the deadline.")
+    race_deadline = rc2.number_input("race deadline (s)", 1.0, 3600.0, 10.0, disabled=not race)
     if st.button("Run it for real", disabled=big, help="Too large to execute in the prototype" if big else None):
         with st.spinner("executing..."):
-            rep = orch.submit(kind, force=None if force == "(the decision)" else force, **params)
+            rep = orch.submit(kind, force=None if force == "(the decision)" else force, race=race,
+                              deadline_s=race_deadline if race else None, **params)
+        if rep.race is not None:
+            (st.success if rep.winner == "quantum" else st.info)(rep.race.summary())
         if rep.error:
             st.error(rep.error)
         else:
@@ -141,23 +148,41 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Discrete-event simulation")
     c1, c2, c3 = st.columns(3)
-    sc = c1.selectbox("Scenario", list(SCENARIOS))
+    sc = c1.selectbox("Scenario", list(SCENARIOS) + list(EXTRA_SCENARIOS))
     n_tasks = c2.slider("tasks", 100, 3000, 600, 100)
     seed = c3.number_input("seed", 0, 100, 0)
-    st.caption(SCENARIOS[sc].description)
-    pols = st.multiselect("Policies", list(POLICIES), default=list(POLICIES))
+    st.caption(get_scenario(sc).description)
+    all_pols = {**POLICIES, **EXTRA_POLICIES}
+    pols = st.multiselect("Policies", list(all_pols), default=list(POLICIES),
+                          help="qedge_hedged runs a classical fallback next to risky QPU jobs (race mode)")
+    b1, b2 = st.columns(2)
+    window = b1.select_slider("QPU batching window (s)", [0, 5, 30, 120], value=0,
+                              help="0 = every QPU task is its own job. Otherwise tasks arriving within the window "
+                                   "share one job (one queue wait, one task fee, shared shots when they fit side by side).")
+    max_batch = b2.slider("most tasks per QPU job", 2, 16, 8)
     if st.button("Run simulation"):
-        sim = Simulator(sc, seed=int(seed))
+        sim = Simulator(sc, seed=int(seed), batching=BatchConfig(window, max_batch) if window else None)
         wl = sim.workloads(n_tasks)
         frames = []
         for p in pols:
-            pol = POLICIES[p](copy.deepcopy(sim.nominal), seed=int(seed))
+            pol = all_pols[p](copy.deepcopy(sim.nominal), seed=int(seed))
             if hasattr(pol, "w"):
                 pol.w = W
             frames.append(sim.run(pol, wl))
         df = pd.concat(frames)
         summ = summarise(df).drop(columns=["scenario"])
         st.dataframe(summ.round(4), hide_index=True)
+        if "batch_id" in df.columns or "hedged" in df.columns:
+            q = df[df.quantum_resource == "qpu"]
+            if len(q):
+                extra = q.groupby("policy").agg(qpu_tasks=("id", "count"), qpu_cost_per_task=("cost_usd", "mean"),
+                                                qpu_deadline_hit_rate=("deadline_met", "mean"))
+                if "batch_size" in q:
+                    extra["mean_batch_size"] = q.groupby("policy").batch_size.mean()
+                if "hedged" in q:
+                    extra["hedged_share"] = q.groupby("policy").hedged.mean()
+                st.markdown("QPU-routed tasks")
+                st.dataframe(extra.reset_index().round(4), hide_index=True)
         m = st.selectbox("Metric", ["deadline_hit_rate", "mean_latency_s", "p95_latency_s", "edge_energy_j",
                                     "total_energy_kj", "cost_usd_per_task", "mean_quality", "quantum_offload_rate"])
         colors = {p: (PALETTE[0] if p.startswith("qedge") else "#b4b2aa") for p in summ.policy}
@@ -209,7 +234,12 @@ with tabs[3]:
             ("e4_qsim_map.png", "E4: QPU decision map, quantum simulation"),
             ("e4_qaoa_advantage.png", "E4: QAOA advantage needed before offloading"),
             ("e6_calibration_choice.png", "E6: output error, fixed device vs calibration-aware routing"),
-            ("e6_calibration_prediction.png", "E6: predicted vs measured, static figures vs calibration")]
+            ("e6_calibration_prediction.png", "E6: predicted vs measured, static figures vs calibration"),
+            ("e7_packing_fidelity.png", "E7: fidelity cost of packing several programs into one job"),
+            ("e7_packing_cost.png", "E7: QPU time and price per program when packed"),
+            ("e7_qpu_cost.png", "E7: QPU cost per task with batching (simulation)"),
+            ("e7_deadline_hit.png", "E7: deadline hit rate with batching and race mode (simulation)"),
+            ("e7_race.png", "E7: live race mode, delivered time vs deadline")]
     for f, cap in figs:
         p = os.path.join("figures", f)
         if os.path.exists(p):

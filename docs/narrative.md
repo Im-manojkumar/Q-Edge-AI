@@ -21,7 +21,10 @@ in approximation ratio at a few dollars per task. The framework detects both reg
 When a QPU is used, *which* QPU and which qubits matter: routing each circuit by per-qubit calibration data
 cut the average output error by 37% against a fixed device (2.2x median reduction, up to 17x on small
 circuits) across 16 circuits on eight IBM device calibrations, and avoided broken qubit links that the
-default placement walked into.
+default placement walked into. Packing several small circuits side by side into one QPU job cut QPU time and
+price per circuit 8x at eight circuits per job, for an emulated fidelity loss under 0.3% before
+crosstalk, and racing a classical fallback against the QPU delivered a result within 0.6 s of every
+deadline in the live prototype.
 
 ## 1. Problem and approach
 
@@ -79,6 +82,7 @@ estimates. All modelling assumptions are in `docs/assumptions.md`.
 | E4 | Where exactly is the quantum boundary? | Decision maps over circuit size and depth for today's and better QPUs, and over a hypothetical QAOA advantage and QPU price. |
 | E5 | Does the prototype run end to end? | Real payloads through the live orchestrator, and every quantum-capable job forced through classical, simulator and QPU-emulator paths. |
 | E6 | Does routing by calibration data pay off? | 16 TFIM, QAOA and kernel circuits (4 to 12 qubits) on eight IBM devices: v1's fixed device and default qubits vs the device and qubits chosen from per-qubit calibration, scored against the ideal output. |
+| E7 | Can the QPU's fixed costs and queue risk be managed? | Packing: up to 26 small circuits side by side in one emulated job on two devices, with and without free qubits between them and under assumed crosstalk levels. Batching and race mode: 11 policy/batching variants x 5 scenarios x 3 seeds in the simulator. Live race mode: the real orchestrator racing the QPU path against the classical fallback at deadlines either side of the QPU time. |
 
 ## 3. Results
 
@@ -237,6 +241,50 @@ as designed; live hardware adds crosstalk and drift between calibrations, which 
 
 ![](figures/e6_calibration_prediction.png)
 
+### 3.7 Sharing QPU jobs and racing a classical fallback (E7)
+
+Every QPU job pays a queue wait and fixed charges, and a 4-qubit circuit uses about 3% of a 133-156 qubit
+chip. E7 tests three ways to manage that, all on top of the calibration-aware routing of 3.6.
+
+**Packing several clients' circuits into one job.** Q-Edge places each circuit on its own best region of
+the chip, optionally leaving a ring of unused qubits around each so programs never touch, runs them as one
+circuit with one set of shots, and splits the results. The chip held up to 20 4-qubit programs on Aachen
+and 18 on Torino with the free ring, or 26 and 22 without it.
+
+| 4-qubit TFIM programs, 4000 shots | alone | 8 per job | full chip |
+|---|---|---|---|
+| QPU seconds per program | 1.11 | 0.139 | 0.043 to 0.050 |
+| Braket-style price per program | $6.10 | $0.76 | $0.23 to $0.28 |
+| Programs per 10 free IBM minutes | 540 | 4321 | 11 883 to 14 043 |
+
+The cost is quality. Up to four programs per job the fidelity loss is lost in shot noise everywhere. At
+eight it is resolved only on the noisier Torino with mixed programs (0.3% without assumed crosstalk). With the chip full it reaches
+0.6-0.7% on Torino and 0.1% on Aachen with the free ring. Crosstalk is not in the emulator, so we added it
+as an assumption: multiplying the error of two-qubit gates next to another program by 2 or 5 raises the
+full-chip loss on Torino to 0.8-2.0%, and the free ring removes it by construction at the price of fewer
+programs per job. On real hardware, crosstalk and idle time while the longest program finishes would add
+to these numbers.
+
+**Batching in the scheduler.** In simulation, QPU tasks arriving within a window share a job. This only
+pays when many tasks go to the QPU: with a quantum-heavy future workload, a 30 s window cut QPU charges per
+task by 19% (shared shots; 7% under a strict all-or-nothing packing rule) while QPU tasks waited 51 s instead
+of 30 s, and a 120 s window cut 28% (1.5% under the strict rule) at 109 s. Where few tasks reach the QPU,
+windows of 30 s or less changed cost by under 0.2%. Batching never raised the deadline hit rate by more than 0.1 point.
+
+**Race mode.** When a QPU job risks its deadline, Q-Edge also runs the best classical placement and keeps
+the QPU result only if it arrives in time, cancelling the QPU job otherwise. In the simulated busy-QPU
+scenario, where the provider under-reports its queue, this lifted the deadline hit rate of QPU tasks from
+77% to 89% and cut QPU charges per task by 18%, because jobs cancelled while still queued cost nothing; the
+extra classical runs cost $0.0001 and 43 J per task. Where the provider's queue estimate is unbiased it never triggered at the default threshold.
+In the live prototype, the QPU result was delivered when it beat the deadline (twice), and otherwise the
+classical result arrived at the deadline with the QPU job cancelled (eight times). Because the emulator
+shares the machine with the fallback, delivery overshot the deadline by up to 0.55 s; on real hardware the
+QPU side is a network wait.
+
+![](figures/e7_packing_fidelity.png)
+
+![](figures/e7_qpu_cost.png)
+
 ## 4. Answer to the project question
 
 * **Run locally on the edge CPU/GPU** when the data are private, the deadline is tight relative to upload
@@ -249,6 +297,9 @@ as designed; live hardware adds crosstalk and drift between calibrations, which 
   workloads met that bar; E4 maps where future hardware would.
 * **When a QPU is used, route by calibration.** Pick the device and qubits from today's per-qubit error data,
   not a fixed device: E6 shows a 37% lower average output error and avoids broken couplers.
+* **Share and hedge QPU jobs.** Pack small circuits from several clients into one job (8x cheaper per
+  circuit at eight per job for under 0.3% fidelity in emulation), and race a classical fallback when the
+  queue might break the deadline.
 
 That conclusion is the framework working as intended. The value of Q-Edge is that the decision is explicit,
 measured and re-evaluated as hardware improves: changing three numbers in the configuration (error rate,
@@ -269,6 +320,10 @@ queue, price) moves the boundary, and the dashboard shows it moving.
   crosstalk or drift. The snapshots are from different dates (2025 to 2026), so the comparison is between
   device calibrations as published, not a same-day comparison. Device queues are only known with a live
   account; without one the router ranks on error rates alone.
+* E7's packing results come from emulators that model no crosstalk and no idle time; crosstalk enters only as
+  an assumed factor. Batching and simulated race mode use the hypothetical future QPU of E3, assume packing
+  costs no fidelity, and assume a job cancelled while queued is not charged. Live race timings share one
+  machine between both paths.
 * Small test sets in the live runs (10 to 30 points) make single-run accuracies noisy; E2 is the place for
   statistical comparison.
 
@@ -276,7 +331,7 @@ queue, price) moves the boundary, and the dashboard shows it moving.
 
 ```bash
 pip install -r requirements.txt
-pytest                                   # 73 tests
-python -m qedge experiments              # all six experiments, then REPORT.md
+pytest                                   # 138 tests
+python -m qedge experiments              # all seven experiments, then REPORT.md
 python -m qedge dashboard
 ```
