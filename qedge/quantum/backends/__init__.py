@@ -8,13 +8,13 @@ from .braket_backend import BraketCloudBackend, BraketLocalBackend
 from .cirq_backend import CirqBackend
 from .ibm_backend import IBMQuantumBackend
 from .pennylane_backend import PennyLaneBackend
-from .qiskit_backend import QiskitAerBackend, QiskitFakeIBMBackend
+from .qiskit_backend import CalibratedIBMBackend, QiskitAerBackend, QiskitFakeIBMBackend
 
 log = logging.getLogger(__name__)
 
 # The four simulator stacks compared head-to-head.
 SIMULATOR_STACKS = ["qiskit", "pennylane", "cirq", "braket-local"]
-HARDWARE_STACKS = ["ibm", "braket"]
+HARDWARE_STACKS = ["ibm", "ibm-auto", "braket"]
 
 _FACTORIES = {
     "qiskit": lambda noise: QiskitAerBackend(noise),
@@ -24,6 +24,7 @@ _FACTORIES = {
     "braket-local": lambda noise: BraketLocalBackend(noise),
     "ibm-emulator": lambda noise: QiskitFakeIBMBackend("FakeTorino"),
     "ibm": lambda noise: IBMQuantumBackend(),
+    "ibm-auto": lambda noise: CalibratedIBMBackend(),
     "braket": lambda noise: BraketCloudBackend(),
 }
 

@@ -1,7 +1,7 @@
 """The live Q-Edge orchestrator: profile -> monitor -> decide -> execute -> evaluate -> feedback.
 
     from qedge.orchestrator.engine import Orchestrator
-    orch = Orchestrator(qpu_stack="ibm")          # real IBM QPU if QISKIT_IBM_TOKEN is set
+    orch = Orchestrator(qpu_stack="ibm-auto")     # best real IBM device if QISKIT_IBM_TOKEN is set
     report = orch.submit("optimization", n=8)
     print(report.explain())
 """
@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 import psutil
 
 from ..executor import ExecResult, Executor
+from ..quantum.backends import CalibratedIBMBackend
 from ..resources import Resource, ResourceState, load_catalogue
 from ..workloads import BUILDERS, Workload, load_calibration
 from .estimator import Placement
@@ -62,7 +63,7 @@ class Monitor:
         self.resources = resources
         self.executor = executor
 
-    def snapshot(self) -> ResourceState:
+    def snapshot(self, w: Workload | None = None) -> ResourceState:
         st = ResourceState(now=time.time())
         cpu = psutil.cpu_percent(interval=0.05) / 100
         st.utilisation["edge_cpu"] = cpu
@@ -77,11 +78,30 @@ class Monitor:
                     depth = None
                 if depth is not None:
                     st.qpu_queue_s[name] = depth * self.AVG_JOB_S
+                self._calibrate(st, name, w)
         return st
+
+    def _calibrate(self, st: ResourceState, name: str, w: Workload | None):
+        """Calibration-aware routing: give the cost model the error figures of the best
+        region of the best device for this workload, and that device's queue."""
+        if w is None or not w.quantum_capable:
+            return
+        try:
+            be = self.executor.backend_for(name)
+        except Exception:
+            return
+        if not isinstance(be, CalibratedIBMBackend):
+            return
+        from ..quantum.calibration import best_device_figures
+        fig = best_device_figures(w.quantum, be.devices)
+        if fig:
+            st.qpu_figures[name] = fig
+            if fig.get("queue_s") is not None:
+                st.qpu_queue_s[name] = fig["queue_s"]
 
 
 class Orchestrator:
-    def __init__(self, policy: str | Policy = "qedge_adaptive", sim_stack: str = "qiskit", qpu_stack: str = "ibm",
+    def __init__(self, policy: str | Policy = "qedge_adaptive", sim_stack: str = "qiskit", qpu_stack: str = "ibm-auto",
                  config: str | None = None, log_path: str | None = "results/live_log.jsonl"):
         load_calibration()
         self.resources = load_catalogue(config)
@@ -95,7 +115,7 @@ class Orchestrator:
         import numpy as np
         w = BUILDERS[kind](self._next_id, np.random.default_rng(self._next_id), **params)
         self._next_id += 1
-        return w, self.policy.decide(w, self.monitor.snapshot())
+        return w, self.policy.decide(w, self.monitor.snapshot(w))
 
     def submit(self, kind: str, force: str | None = None, **params) -> Report:
         w, d = self.plan(kind, **params)

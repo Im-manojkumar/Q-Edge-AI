@@ -117,6 +117,22 @@ def build(path: str = "REPORT.md", narrative: str = "docs/narrative.md"):
         cols = ["tag", "kind", "params", "placement", "method", "backend", "fallback_from", "predicted_quality",
                 "quality", "predicted_latency_s", "measured_latency_s", "predicted_cost_usd", "error"]
         parts.append(_md(live[[c for c in cols if c in live.columns]], ".3g"))
+    e6 = _r("e6_summary.csv")
+    if e6 is not None:
+        parts.append("## A8. Calibration-aware routing (E6)\n")
+        src = _r("e6_calibration.csv")
+        kind = "live IBM calibration" if src is not None and (src.source == "live").all() else \
+            "calibration snapshots of real IBM devices (local emulation of each device)"
+        parts.append(f"Data: {kind}. Output error = 1 - Hellinger fidelity to the ideal distribution, 4000 shots.\n")
+        cols = ["case", "n_qubits", "v1_error", "calibrated_error", "calibrated_device", "oracle_device",
+                "picked_oracle", "static_pred", "calibrated_esp"]
+        parts.append(_md(e6[[c for c in cols if c in e6.columns]]))
+        pr = _r("e6_prediction.csv")
+        if pr is not None:
+            parts.append("\nHow well each predictor tracks measured fidelity (Spearman rank correlation; "
+                         "'within circuit' asks whether it ranks the devices correctly):\n")
+            parts.append(_md(pr))
+        parts.append("\n![](figures/e6_calibration_choice.png)\n\n![](figures/e6_calibration_prediction.png)\n")
     with open(path, "w") as f:
         f.write("\n".join(parts) + "\n")
     return path

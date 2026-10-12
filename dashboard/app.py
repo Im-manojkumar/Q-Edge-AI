@@ -44,11 +44,12 @@ with st.sidebar:
     )
     st.header("Quantum services")
     sim_stack = st.selectbox("Quantum simulator stack", ["qiskit", "pennylane", "cirq", "braket-local"])
-    qpu_stack = st.selectbox("QPU route", ["ibm", "braket", "ibm-emulator"],
-                             help="Real hardware needs credentials in environment variables; otherwise it falls back "
-                                  "to a local emulator and says so.")
+    qpu_stack = st.selectbox("QPU route", ["ibm-auto", "ibm", "braket", "ibm-emulator"],
+                             help="ibm-auto picks the IBM device and qubits from calibration data. Real hardware needs "
+                                  "credentials in environment variables; otherwise it uses calibration snapshots and a "
+                                  "local emulator and says so.")
 
-tabs = st.tabs(["Orchestrator", "Simulation", "What-if map", "Experiment results", "Providers"])
+tabs = st.tabs(["Orchestrator", "Simulation", "What-if map", "Experiment results", "Providers", "Calibration"])
 
 # ---------------------------------------------------------------- orchestrator
 with tabs[0]:
@@ -206,7 +207,9 @@ with tabs[3]:
             ("e3_policies_network_congested.png", "E3: policy comparison (congested network)"),
             ("e3_scenarios.png", "E3: deadline hit rate across scenarios"),
             ("e4_qsim_map.png", "E4: QPU decision map, quantum simulation"),
-            ("e4_qaoa_advantage.png", "E4: QAOA advantage needed before offloading")]
+            ("e4_qaoa_advantage.png", "E4: QAOA advantage needed before offloading"),
+            ("e6_calibration_choice.png", "E6: output error, fixed device vs calibration-aware routing"),
+            ("e6_calibration_prediction.png", "E6: predicted vs measured, static figures vs calibration")]
     for f, cap in figs:
         p = os.path.join("figures", f)
         if os.path.exists(p):
@@ -244,3 +247,65 @@ Runs on real hardware are capped by `QEDGE_HW_MAX_CIRCUITS` (default 60) and `QE
                                     "quality": (r["result"] or {}).get("quality"),
                                     "backend": (r["result"] or {}).get("backend"), "error": r["error"]} for r in log]),
                      hide_index=True)
+
+# ---------------------------------------------------------------- calibration
+with tabs[5]:
+    from qedge.executor import representative_circuit
+    from qedge.quantum import calibration as calmod
+    from qedge.quantum.backends.qiskit_backend import to_qiskit
+    from qedge.workloads import BUILDERS
+
+    st.subheader("Calibration-aware routing")
+
+    @st.cache_resource
+    def devices(prefer_live: bool):
+        return calmod.load_devices(prefer_live)
+
+    devs = devices(True)
+    live = devs[0].source == "live"
+    if live:
+        st.success(f"Live calibration from {len(devs)} IBM devices on your account (reading it uses no QPU time).")
+    else:
+        st.info("No IBM credentials: using calibration snapshots of real IBM devices, emulated locally. "
+                "Set QISKIT_IBM_TOKEN to route on today's live data.")
+    summ = pd.DataFrame([d.summary() for d in devs]).sort_values("median_2q_error")
+    st.dataframe(summ, hide_index=True)
+
+    c1, c2 = st.columns(2)
+    kind = c1.selectbox("Workload to place", ["quantum_simulation", "optimization", "kernel_classification"])
+    if kind == "quantum_simulation":
+        params = {"n": c2.slider("qubits", 2, 20, 8), "steps": c2.slider("Trotter steps", 1, 6, 3)}
+    elif kind == "optimization":
+        params = {"n": c2.slider("graph nodes (qubits)", 3, 16, 8), "p": 1}
+    else:
+        params = {"features": c2.slider("features (qubits)", 2, 12, 6), "n_train": 20, "n_test": 10}
+
+    @st.cache_data(show_spinner="Scoring every device and qubit layout ...")
+    def ranking(kind, params_json):
+        w = BUILDERS[kind](0, np.random.default_rng(0), **json.loads(params_json))
+        best, allc = calmod.select_device(to_qiskit(representative_circuit(w)), devices(True))
+        return best.device, pd.DataFrame([c.row() for c in allc]).sort_values("esp", ascending=False)
+
+    best_dev, rank = ranking(kind, json.dumps(params))
+    st.markdown(f"**Chosen: {best_dev}.** Estimated success probability (ESP) per device, with the qubits it "
+                "would use. `default_esp` is what Qiskit's own placement gets on that device.")
+    st.dataframe(rank[["device", "esp", "default_esp", "two_q_count", "depth", "queue_s", "layout"]], hide_index=True)
+    fig = px.bar(rank, x="device", y="esp", color_discrete_sequence=[PALETTE[0]])
+    fig.update_layout(height=280, margin=dict(t=10, b=10), yaxis_title="estimated success probability")
+    st.plotly_chart(fig, use_container_width=True)
+
+    show = st.selectbox("Error map for device", list(summ.device), index=list(summ.device).index(best_dev))
+    try:
+        from qiskit.visualization import plot_error_map
+        cal = next(d for d in devs if d.name == show)
+        st.pyplot(plot_error_map(cal.backend, figsize=(11, 6)))
+    except Exception as e:  # plotting is a convenience; routing does not depend on it
+        st.caption(f"error map unavailable: {e}")
+
+    drift = calmod.drift_from_trace()
+    if drift:
+        st.markdown("**Drift between the first and last logged calibration** (`python -m qedge calibration log`)")
+        st.dataframe(pd.DataFrame(drift), hide_index=True)
+    else:
+        st.caption("Log live calibration and queues over time with `python -m qedge calibration log --count 144` "
+                   "to see drift here and to run the simulator on the real queue trace (`--scenario ibm_trace`).")

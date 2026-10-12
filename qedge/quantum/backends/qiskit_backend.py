@@ -129,3 +129,119 @@ class QiskitFakeIBMBackend(QuantumBackend):
 def estimate_fidelity(c: Circuit, noise: NoiseSpec) -> float:
     """Crude success-probability estimate used by the cost model."""
     return math.prod([(1 - noise.p1)] * c.n_1q + [(1 - noise.p2) ** 2] * c.n_2q)
+
+
+class CalibratedIBMBackend(QuantumBackend):
+    """Calibration-aware IBM routing: for each circuit, pick the device and the
+    physical qubits with the highest estimated success probability from today's
+    calibration, then run there.
+
+    With IBM credentials it considers every operational device on the account
+    and runs on the real one it picks. Without credentials it does the same over
+    calibration snapshots of real IBM devices and runs on a local emulator of
+    the chosen one (that device's own noise model), so the whole decision path
+    can be exercised for free.
+    """
+
+    framework = "qiskit"
+
+    def __init__(self, devices: list[str] | None = None, prefer_live: bool = True, queue_weight: float = 0.0,
+                 noise: NoiseSpec | None = None):
+        super().__init__(noise)
+        self._device_names = devices
+        self.prefer_live = prefer_live
+        self.queue_weight = queue_weight
+        self._devices = None
+        self._layouts: dict = {}
+        self._sims: dict = {}
+        self.name = "ibm-auto"
+        self.last_choice = None
+
+    @property
+    def devices(self):
+        if self._devices is None:
+            from ..calibration import load_devices
+            self._devices = load_devices(self.prefer_live, self._device_names)
+        return self._devices
+
+    @property
+    def live(self) -> bool:
+        return bool(self.devices) and self.devices[0].source == "live"
+
+    @property
+    def hardware(self):  # type: ignore[override]
+        return self.live
+
+    @property
+    def max_qubits(self):  # type: ignore[override]
+        # Emulation has to simulate the active qubits, so stay well below device size.
+        return max(d.num_qubits for d in self.devices) if self.live else 24
+
+    def available(self):
+        try:
+            devs = self.devices
+        except Exception as e:  # pragma: no cover
+            return False, f"no calibration data: {e}"
+        kind = "live IBM devices" if self.live else "IBM calibration snapshots (local emulation)"
+        return True, f"Calibration-aware routing over {len(devs)} {kind}"
+
+    def queue_depth(self):
+        known = [d.pending_jobs for d in self.devices if d.pending_jobs is not None]
+        return min(known) if known else None
+
+    def refresh(self):
+        """Reload calibrations (live data changes through the day) and drop cached layouts."""
+        self._devices = None
+        self._layouts.clear()
+
+    @staticmethod
+    def _structure(c: Circuit) -> tuple:
+        # Circuits that differ only in angles share a layout (e.g. every QAOA iteration).
+        return (c.n_qubits, tuple((g.name, g.qubits) for g in c.gates))
+
+    def choose(self, c: Circuit):
+        from ..calibration import select_device
+        key = self._structure(c)
+        if key not in self._layouts:
+            best, _ = select_device(to_qiskit(c), self.devices, queue_weight=self.queue_weight)
+            self._layouts[key] = best
+        return self._layouts[key]
+
+    def _isa(self, c: Circuit, choice):
+        from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+        if self._structure(c) == self._structure(self._chosen_for):
+            return choice.circuit
+        cal = next(d for d in self.devices if d.name == choice.device)
+        pm = generate_preset_pass_manager(optimization_level=1, backend=cal.backend,
+                                          initial_layout=choice.layout[: c.n_qubits], seed_transpiler=11)
+        return pm.run(to_qiskit(c))
+
+    def _run(self, circuits, shots):
+        big = max(circuits, key=lambda c: (c.n_qubits, len(c.gates)))
+        choice = self.choose(big)
+        self._chosen_for = big
+        self.last_choice = choice
+        cal = next(d for d in self.devices if d.name == choice.device)
+        isa = [self._isa(c, choice) for c in circuits]
+        meta = {"device": choice.device, "calibration": cal.source, "layout": choice.layout,
+                "predicted_esp": choice.esp, "qiskit_default_esp": choice.default_esp,
+                "transpiled_depths": [qc.depth() for qc in isa]}
+        if self.live:
+            from qiskit_ibm_runtime import SamplerV2
+            import time as _t
+            t0 = _t.perf_counter()
+            job = SamplerV2(mode=cal.backend).run(isa, shots=shots)
+            result = job.result()
+            total = _t.perf_counter() - t0
+            try:
+                usage = job.usage()
+            except Exception:
+                usage = None
+            counts = [qiskit_counts(r.data.meas.get_counts(), c.n_qubits) for r, c in zip(result, circuits)]
+            meta.update(job_ids=[job.job_id()], qpu_seconds=usage, queue_time_s=max(0.0, total - (usage or 0.0)))
+            return counts, meta
+        from qiskit_aer import AerSimulator
+        if cal.name not in self._sims:
+            self._sims[cal.name] = AerSimulator.from_backend(cal.backend)
+        res = self._sims[cal.name].run(isa, shots=shots).result()
+        return [qiskit_counts(res.get_counts(i), c.n_qubits) for i, c in enumerate(circuits)], meta

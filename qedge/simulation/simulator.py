@@ -19,6 +19,8 @@ from ..orchestrator.policies import Policy, make_policy
 from ..resources import Resource, ResourceState, load_catalogue, scale
 from ..workloads import Workload, generate
 
+DEFAULT_QPU_QUEUE_S = 120.0
+
 
 @dataclass
 class Scenario:
@@ -30,6 +32,7 @@ class Scenario:
     mix: dict | None = None
     qpu_report_bias: float = 1.0                         # provider queue estimate / true
     noise_sigma: float = 0.15
+    queue_trace: list[float] | None = None               # measured QPU waits (s) to sample from
 
 
 SCENARIOS: dict[str, Scenario] = {s.name: s for s in [
@@ -57,10 +60,28 @@ SCENARIOS: dict[str, Scenario] = {s.name: s for s in [
 ]}
 
 
+def trace_scenario(path: str | None = None) -> Scenario:
+    """Scenario whose QPU queue is sampled from a logged IBM trace
+    (``python -m qedge calibration log``) instead of an assumed distribution."""
+    from ..quantum.calibration import TRACE_PATH, queue_trace_seconds
+    waits = queue_trace_seconds(path or TRACE_PATH)
+    if not waits:
+        raise FileNotFoundError(f"no logged queue data in {path or TRACE_PATH}; run `python -m qedge calibration log` "
+                                "with QISKIT_IBM_TOKEN set")
+    mean = float(np.mean(waits))
+    return Scenario("ibm_trace", f"QPU queue drawn from {len(waits)} logged IBM observations (mean {mean:.0f}s); "
+                    "the scheduler is told the trace mean.",
+                    belief_scale={"qpu__queue_mean_s": mean / DEFAULT_QPU_QUEUE_S}, queue_trace=waits)
+
+
+def get_scenario(name: str) -> Scenario:
+    return trace_scenario() if name == "ibm_trace" else SCENARIOS[name]
+
+
 class Simulator:
     def __init__(self, scenario: Scenario | str = "baseline", catalogue: dict[str, Resource] | None = None,
                  seed: int = 0):
-        self.sc = SCENARIOS[scenario] if isinstance(scenario, str) else scenario
+        self.sc = get_scenario(scenario) if isinstance(scenario, str) else scenario
         base = catalogue or load_catalogue()
         self.nominal = scale(base, **self.sc.belief_scale)
         self.true = scale(self.nominal, **self.sc.true_scale)
@@ -89,7 +110,11 @@ class Simulator:
             # --- ground truth ---------------------------------------------------
             truth_state = copy.copy(observed)
             truth_state.rtt_s = {n: r.rtt_s for n, r in self.true.items() if not r.is_edge}
-            truth_state.qpu_queue_s = {n: float(rng.exponential(m)) if m > 0 else 0.0 for n, m in qpu_true_mean.items()}
+            if self.sc.queue_trace:
+                truth_state.qpu_queue_s = {n: float(rng.choice(self.sc.queue_trace)) for n in qpu_true_mean}
+            else:
+                truth_state.qpu_queue_s = {n: float(rng.exponential(m)) if m > 0 else 0.0
+                                           for n, m in qpu_true_mean.items()}
             truth = self.true_model.estimate(w, d.placement, truth_state)
             noise = float(rng.lognormal(0, self.sc.noise_sigma))
             wait = truth.breakdown.get("queue", 0.0)

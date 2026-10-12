@@ -182,12 +182,46 @@ def qaoa_adv(df: pd.DataFrame, out: str):
     _save(fig, out)
 
 
+def calibration_choice(df: pd.DataFrame, out: str):
+    """E6 summary: error rate (1 - fidelity) of v1's fixed device vs calibration-aware routing."""
+    d = df.copy()
+    x = np.arange(len(d))
+    fig, ax = plt.subplots(figsize=(max(6, 0.55 * len(d) + 2), 3.6))
+    w = 0.27
+    ax.bar(x - w, 1 - d.v1_fidelity, w, color=GRAY, label="v1: Torino, default qubits")
+    ax.bar(x, 1 - d.same_device_best_layout, w, color=ORANGE, label="Torino, calibrated qubits")
+    ax.bar(x + w, 1 - d.calibrated_fidelity, w, color=BLUE, label="calibrated device + qubits")
+    ax.scatter(x + w, 1 - d.oracle_fidelity, marker="_", s=120, color=INK, zorder=3, label="best possible (oracle)")
+    ax.set_xticks(x, d.case, rotation=40, ha="right")
+    ax.set_ylabel("output error (1 - Hellinger fidelity)")
+    ax.set_title("Calibration-aware routing: output error by circuit")
+    ax.legend(fontsize=8, ncol=2)
+    _save(fig, out)
+
+
+def calibration_prediction(df: pd.DataFrame, out: str):
+    """E6: predicted success probability vs measured fidelity, every (circuit, device) pair."""
+    fig, axes = plt.subplots(1, 2, figsize=(9, 3.6), sharey=True)
+    for ax, col, title in [(axes[0], "static_pred", "static catalogue figures (v1)"),
+                           (axes[1], "esp_best", "per-qubit calibration ESP (now)")]:
+        for i, (dev, g) in enumerate(df.groupby("device")):
+            c = [BLUE, ORANGE, AQUA, YELLOW, MAGENTA, INK, MUTED, GRAY][i % 8]
+            ax.scatter(g[col], 1 - g.fidelity_best, s=14, color=c, label=dev.replace("fake_", ""), alpha=0.85)
+        ax.set_xlabel("predicted success probability")
+        ax.set_title(title)
+    axes[0].set_ylabel("measured output error")
+    axes[1].legend(fontsize=7, ncol=2)
+    _save(fig, out)
+
+
 def make_all(res: str = "results", fig: str = "figures"):
     os.makedirs(fig, exist_ok=True)
     jobs = [("e1_stacks.csv", stacks, "e1_stack_speed.png"), ("e2_maxcut.csv", maxcut, "e2_maxcut.png"),
             ("e2_kernel.csv", kernel, "e2_kernel.png"), ("e3_summary.csv", policies, "e3_policies_baseline.png"),
             ("e3_summary.csv", scenarios, "e3_scenarios.png"), ("e4_qsim_map.csv", qsim_map, "e4_qsim_map.png"),
-            ("e4_qaoa_advantage.csv", qaoa_adv, "e4_qaoa_advantage.png")]
+            ("e4_qaoa_advantage.csv", qaoa_adv, "e4_qaoa_advantage.png"),
+            ("e6_summary.csv", calibration_choice, "e6_calibration_choice.png"),
+            ("e6_calibration.csv", calibration_prediction, "e6_calibration_prediction.png")]
     for csv, fn, png in jobs:
         p = os.path.join(res, csv)
         if os.path.exists(p):

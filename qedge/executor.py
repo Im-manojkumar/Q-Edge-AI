@@ -71,6 +71,23 @@ def kernel_dataset(d: int, n_train: int, n_test: int, seed: int = 0):
     return Z[:n_train], Z[n_train:], y[idx][:n_train], y[idx][n_train:]
 
 
+def representative_circuit(w):
+    """One circuit with the structure this workload runs on a QPU. Angles do not
+    change qubit placement, so this is what layout and device choice are made on."""
+    from .quantum.algorithms import kernel_circuit, qaoa_circuit
+    p = w.params
+    if w.kind == "optimization":
+        n, reps = int(p["n"]), int(p.get("p", 1))
+        return qaoa_circuit(n, random_graph(n, p.get("density", 0.3), seed=w.id), [0.4] * reps, [0.3] * reps)
+    if w.kind == "kernel_classification":
+        d = int(p["features"])
+        x = np.linspace(0.1, 1.0, d) * KERNEL_BANDWIDTH(d) * np.pi
+        return kernel_circuit(x, x[::-1])
+    if w.kind == "quantum_simulation":
+        return tfim_trotter(int(p["n"]), int(p["steps"]))
+    raise ValueError(f"{w.kind} has no quantum circuit")
+
+
 class Executor:
     def __init__(self, sim_stack: str = "qiskit", qpu_stack: str = "ibm"):
         self.sim_stack = sim_stack

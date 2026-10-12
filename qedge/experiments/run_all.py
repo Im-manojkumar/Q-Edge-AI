@@ -8,7 +8,7 @@ import time
 
 import pandas as pd
 
-from . import e1_stacks, e2_quantum_vs_classical, e3_e4_e5, figures
+from . import e1_stacks, e2_quantum_vs_classical, e3_e4_e5, e6_calibration, figures
 
 
 def save(frames: dict[str, pd.DataFrame], out_dir: str):
@@ -17,7 +17,7 @@ def save(frames: dict[str, pd.DataFrame], out_dir: str):
 
 
 def main(quick: bool = False, only: list[str] | None = None, out_dir: str = "results", fig_dir: str = "figures",
-         qpu_stack: str = "ibm"):
+         qpu_stack: str = "ibm-auto"):
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(fig_dir, exist_ok=True)
     steps = {
@@ -26,6 +26,7 @@ def main(quick: bool = False, only: list[str] | None = None, out_dir: str = "res
         "e3": lambda: e3_e4_e5.e3(quick),
         "e4": e3_e4_e5.e4,
         "e5": lambda: e3_e4_e5.e5(quick, qpu_stack),
+        "e6": lambda: e6_calibration.run(quick),
     }
     meta = {"quick": quick, "python": platform.python_version(), "machine": platform.machine(),
             "processor": platform.processor(), "started": time.strftime("%Y-%m-%d %H:%M:%S")}

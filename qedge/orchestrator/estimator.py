@@ -8,6 +8,7 @@ believed parameters) and by the simulator (with the true, hidden ones).
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 
 from ..resources import RADIO_POWER_W, Resource, ResourceState
@@ -41,11 +42,13 @@ class Estimate:
     fidelity: float | None = None
     breakdown: dict = field(default_factory=dict)
     score: float | None = None
+    qpu_device: str | None = None      # device chosen by calibration-aware routing
 
     def row(self) -> dict:
         return {"placement": self.placement.label, "feasible": self.feasible, "latency_s": self.latency_s,
                 "energy_j": self.energy_j, "edge_energy_j": self.edge_energy_j, "cost_usd": self.cost_usd,
                 "quality": self.quality, "fidelity": self.fidelity, "score": self.score,
+                "qpu_device": self.qpu_device,
                 "reasons": "; ".join(self.reasons), **{f"t_{k}": v for k, v in self.breakdown.items()}}
 
 
@@ -91,6 +94,16 @@ class CostModel:
     # ---- quantum execution --------------------------------------------------
     def _quantum(self, w: Workload, host: Resource, q: Resource, st: ResourceState, est: Estimate):
         qp = w.quantum
+        cal = st.qpu_figures.get(q.name)
+        if cal and not q.sim_gflops:
+            # Today's calibration for the best region of the best device replaces the
+            # static catalogue figures for this workload.
+            q = copy.copy(q)
+            for k in ("p1", "p2", "readout_err", "max_qubits"):
+                if cal.get(k) is not None:
+                    setattr(q, k, cal[k])
+            src = "live calibration" if cal.get("source") == "live" else "calibration snapshot"
+            est.qpu_device = f"{cal.get('device')} ({src})"
         if qp.n_qubits > q.max_qubits:
             est.feasible = False
             est.reasons.append(f"{qp.n_qubits} qubits > {q.max_qubits} on {q.name}")

@@ -35,6 +35,20 @@ before quoting them.
 Circuit fidelity is estimated as `(1-p1)^n1q · (1-p2)^(2·n2q) · (1-readout)^n`. Two-qubit counts for QAOA include
 a routing factor `1 + 0.25 × average degree` for SWAPs when a dense graph is mapped to sparse hardware coupling.
 
+## Calibration-aware routing (`ibm-auto`)
+
+| Figure | Value | Basis |
+|---|---|---|
+| Per-qubit and per-coupler errors | read from the device | IBM live calibration, or snapshots shipped with `qiskit-ibm-runtime` (dates in `python -m qedge calibration show`) |
+| Unusable gate or readout | error ≥ 0.5 | IBM reports broken couplers with error 1.0 |
+| Seconds per queued job | 20 s | converts IBM's "pending jobs" into a wait; public jobs vary widely |
+| Layout search | Qiskit optimisation level 3, then up to 4000 more placements (8 shuffled VF2 restarts) scored by ESP | mapomatic approach (Nation & Treinish, 2023) |
+| Region figures for the cost model | best connected n-qubit region found greedily from the 12 best couplers | fast approximation; the executor then scores the real circuit |
+
+Estimated success probability (ESP) is the product of `(1 - error)` over every non-virtual gate and every
+measurement on the chosen physical qubits. It predicts the chance of an error-free run, not the output
+quality, so it is used to *rank* devices and layouts.
+
 ## Result quality
 
 * **MaxCut**: quality = best cut found / optimum. QAOA and random-sampling curves are fitted from E2

@@ -154,7 +154,10 @@ class QEdgeCostPolicy(Policy):
         if not w.quantum_capable:
             return checks
         qp = w.quantum
-        checks.append(("fits device", qp.n_qubits <= q.max_qubits, f"{qp.n_qubits} of {q.max_qubits} qubits"))
+        if e.qpu_device:
+            checks.append(("calibrated device", True, f"best qubit region of {e.qpu_device}"))
+        else:
+            checks.append(("fits device", qp.n_qubits <= q.max_qubits, f"{qp.n_qubits} of {q.max_qubits} qubits"))
         checks.append(("data may leave edge", not w.privacy, "private" if w.privacy else "ok"))
         if e.fidelity is not None and not q.sim_gflops:
             checks.append(("circuit fidelity", e.fidelity >= self.min_fidelity,

@@ -102,6 +102,9 @@ class ResourceState:
     qpu_queue_s: dict[str, float] = field(default_factory=dict)    # provider-reported wait
     utilisation: dict[str, float] = field(default_factory=dict)
     online: dict[str, bool] = field(default_factory=dict)
+    # Per-workload QPU figures from live or snapshot calibration (calibration-aware
+    # routing): {"qpu": {"device", "p1", "p2", "readout_err", "max_qubits", ...}}.
+    qpu_figures: dict[str, dict] = field(default_factory=dict)
 
     def as_dict(self):
         return asdict(self)
