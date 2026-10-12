@@ -150,3 +150,54 @@ arrival rate (0.6 tasks/s) and a mix of 40% quantum simulation, 30% optimisation
   the logged `quantum_status` is provisional; the final one is only on the in-memory `RaceInfo`.
 * When the QPU wins, the classical path is not stopped (it is local and short here). Its result is recorded when
   it finishes.
+
+## Split model (idea 3, `qedge/ml/`)
+
+A small CNN backbone runs on the edge, a k-number embedding (k = 2..8) comes out of it, and a head turns it into
+10 class scores: a linear layer, a parameter-matched MLP, or a k-qubit variational circuit with a linear readout
+(the "quantum head", a dressed quantum circuit after Mari et al. 2020). The quantum head assists the classical
+model; measured so far it is level with or below the classical heads (see `qedge/ml/__init__.py` and E8).
+
+| Figure / rule | Value | Basis |
+|---|---|---|
+| Data | scikit-learn digits, 8x8, pixels / 16, stratified 60/20/20, seed 0 | small enough to train everything on a CPU; a toy next to a camera stream |
+| Backbone and cut points | input (1x8x8 = 64 values) -> conv3x3 1->8, ReLU, maxpool -> conv1 (128) -> conv3x3 8->16, ReLU, maxpool -> conv2 (64) -> dense 64->k, tanh -> embedding (k) | conv1 is larger than the input, the classic Neurosurgeon observation (Kang et al., ASPLOS 2017) |
+| Transmitted tensor | float32, 4 bytes per value | no compression or quantisation is modelled |
+| FLOPs | 2 per multiply-add of conv and dense layers; bias, activations, pooling not counted | analytic, per sample |
+| Quantum head | RY(pi/2 (z+1)) encoding, L x (RZ RY RZ + CNOT ring), <Z_i>, linear k -> 10 | L = 2 unless stated; `quantum_l0` (L = 0, encoding + readout only) is the ablation |
+| MLP width | hidden units whose parameter count is closest to the quantum head's total | parameter-matched comparison; the quantum total includes k redundant angles, which favours the MLP slightly |
+| Training | transfer mode: backbone + linear head end to end, then every head on the frozen embedding; Adam, softmax cross-entropy, early stopping on validation accuracy | validation only for selection; the test split is touched once per number |
+| Attacker | honest-but-curious remote party with same-distribution labelled images (the training split) | ridge, one-hidden-layer MLP and kNN-regression decoders, hyperparameters chosen on validation; the strongest per metric. Numbers hold "against these attacks" only |
+| Privacy rule (`private_ok`) | images re-identified that the label-only baseline does not (counted per image) <= 5 x chance, and r2 beyond the label <= 0.10 | policy thresholds, not a standard. Measured (seed 0, k = 2, 3, 4, 5, 6, 8): no cut passes, the embedding included, so private batches stay on the edge |
+| Shared cuts in the profile | sizes and front FLOPs from one backbone per k; leakage = the worst over k; private only if private for every k | conservative. The file stores `back_flop` at k = 4 (and every k under `back_flop_by_k`); the router recomputes it per k as total(k) - front |
+| Classical head of a k | linear or MLP, whichever has the higher validation accuracy | picking on test accuracy would be model selection on the test split |
+| Packed QPU cost of the head | `packing_cost`: catalogue QPU figures, Braket-style per-task / per-shot prices | same assumptions as E7 |
+
+## Split placements: the router (`qedge/orchestrator/split.py`)
+
+The router chooses where to cut the network (`edge_gpu>conv2>cloud_gpu`) and whether the head runs classically
+or on a quantum resource (`edge_gpu>embedding>qpu`). It reads a *split profile*: `results/split_profile.json`
+when E8 has written it (loaded by `Orchestrator()`, `qedge split profile` shows what is loaded), else built-in
+defaults.
+
+| Figure / rule | Value | Basis |
+|---|---|---|
+| `digits` defaults | bytes and FLOPs from the architecture; head accuracies 0.80 (linear, MLP), 0.75 (quantum), 0.70 (L = 0) and "not private" everywhere | **placeholders**, pessimistic round numbers so the router never favours the quantum head before E8 has measured it; a measured k replaces its entry, an unmeasured k keeps the placeholder and says so |
+| `camera` profile | MobileNetV2 1.0 at 224x224 with a k-dim bottleneck: about 300 M multiply-adds per image (Sandler et al., 2018) minus the 1000-way classifier; activation sizes from the architecture; input 0.15 MB per image as in `make_inference` | **assumption profile**: nothing is measured on it and it has no trained model, so it can be planned but not run. Every cut but the embedding counts as not private; the embedding's accuracies and privacy verdict are inherited from digits and labelled so |
+| FLOPs after a cut | total(k) - front FLOPs | a split neither adds nor loses work against the whole model |
+| What comes back | float32 logits (4 x classes bytes per image) from a classical back; k expectation values (4 x k bytes) from the quantum head, whose linear readout runs on the edge | |
+| Network | upload = batch x tensor bytes / uplink; a classical back adds its RTT; the quantum head's round trip is the per-round hop of the QPU model | same transfer model as every other kind |
+| Quantum head on heavy-hex hardware | two-qubit gates scaled by a routing factor measured by transpiling the L = 2 ring onto FakeTorino (k = 3..8: 10/6, 17/8, 24/10, 33/12, 44/14, 40/16); each added gate adds one layer of depth | the L = 2 factor is used for every L; the depth rule is an upper bound when SWAPs on disjoint qubits run in parallel |
+| Quantum head quality | f x (ideal quantum accuracy) + (1 - f) / classes, f = estimated circuit fidelity | a model: an error anywhere randomises the answer (pessimistic for errors that do not flip the argmax); shot noise is not modelled |
+| Privacy | a placement is feasible for a private batch only if everything it transmits is at a cut marked `private_ok`; the raw input never is | replaces "raw data never leaves the edge" with a measured property against stated attacks |
+
+## Running a split for real (`Executor`, `qedge/ml/zoo.py`)
+
+| Figure / rule | Value | Basis |
+|---|---|---|
+| Model | the transfer-mode digits model for the workload's k, trained on first use with the default settings and cached in `results/models/` (not committed; a file whose training settings differ from the code's is retrained) | measured on this machine: k = 4 trains in 27.6 s (15.7 s of it the quantum head), k = 8 in 146 s (133 s); loading a cached model takes about 0.003 s |
+| Images | `batch` test-split images drawn without replacement, seeded by the workload id | the quantum path and its race fallback see the same batch |
+| Where it runs | every classical part runs on this machine; the edge/cloud split is honoured (the remote part starts from the float32 tensor the edge would send) and the bytes are counted, but the transfer is modelled, not sent | as for every other kind |
+| Quantum head | `quantum_sim`: one circuit per image on the simulator stack; `qpu` on `ibm-auto` with batch > 1: packed, 8 images per job (idea 2's packing), else one circuit per image | hardware limits (`QEDGE_HW_MAX_CIRCUITS`, `QEDGE_HW_MAX_SHOTS`) apply before anything is submitted; the race token is checked before every job |
+| QPU seconds and price in a result | `packing_cost` figures (catalogue QPU timings, Braket-style prices) | modelled, not metered; labelled in the result |
+| Reported quality | batch accuracy, plus the agreement with the exact (noise-free, shot-free) quantum head on the same embeddings | a batch of a few images is a noisy estimate of the profile's test accuracy |
