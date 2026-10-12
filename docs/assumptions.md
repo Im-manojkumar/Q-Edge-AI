@@ -125,3 +125,28 @@ wait is lognormal with the same 12 s mean and sigma 1.5 (median 3.9 s; about 1% 
 mean, against 0.005% for an exponential queue). `quantum_heavy_future` uses the `future_qpu` figures, 3x the
 arrival rate (0.6 tasks/s) and a mix of 40% quantum simulation, 30% optimisation, 10% kernel classification,
 15% inference and 5% training.
+
+## Race mode (`submit(..., race=True)`)
+
+| Figure | Value | Basis |
+|---|---|---|
+| Fallback raced against the QPU | lowest-score feasible classical placement in the decision | same score the policy ranks with; lowest predicted latency for policies that do not score |
+| Deadline | `deadline_s`, else the workload's own deadline, wall clock from `submit()` | planning time counts against it |
+| Cancellation granularity | one backend `run()` call | every `run()` checks the token first; an SDK call already in progress is not interrupted |
+| Feedback to the adaptive policy | the delivered placement only, measured as outside a race | a cancelled QPU run only says "slower than the deadline" (censored), so it is not fed back |
+
+* Local emulators cannot be stopped mid-job. After a cancel the abandoned thread finishes its current job in the
+  background and its result is discarded. A QAOA run stops at its next `run()` call. `ibm-auto` also checks the
+  token after its layout search, before it emulates or submits. A script exits only once these threads have ended.
+* On live IBM hardware the Runtime job is registered on the token, and cancelling it calls `RuntimeJobV2.cancel()`.
+  If IBM refuses (the job already finished), the result arrives and is discarded. This path follows the
+  qiskit-ibm-runtime 0.50 API but has **not** been run against a live account.
+* Both paths run on one machine here, so they compete for CPU and for Python's GIL. The emulator holds the GIL for
+  long stretches, so the thread waiting for the deadline can wake late. The report records this as
+  `overshoot_s`. Race timings are therefore not the timings either path would have on its own hardware.
+  Whether the QPU made the deadline is judged by when its thread finished, not by when the waiting thread woke,
+  so a QPU result that lands in that gap is `late` and the classical result is delivered.
+* The live log line is written at delivery. If the QPU thread is still running then (`quantum_settled: false`),
+  the logged `quantum_status` is provisional; the final one is only on the in-memory `RaceInfo`.
+* When the QPU wins, the classical path is not stopped (it is local and short here). Its result is recorded when
+  it finishes.

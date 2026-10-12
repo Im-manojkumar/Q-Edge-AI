@@ -8,13 +8,19 @@ Uses the user's own IBM Quantum Platform account (the free Open Plan gives
     IBM_QUANTUM_BACKEND  optional device name, e.g. ibm_torino (default: least busy)
 
 or save the account once with QiskitRuntimeService.save_account(...).
+
+Race mode: when ``run()`` is called under a ``CancelToken`` (see ``base.py``),
+the submitted Runtime job is registered on it, so a missed deadline calls
+``RuntimeJobV2.cancel()`` and the blocked ``result()`` ends with ``Cancelled``.
+That path follows the qiskit-ibm-runtime 0.50 API but has not been run against
+a live account.
 """
 from __future__ import annotations
 
 import os
 import time
 
-from .base import QuantumBackend
+from .base import QuantumBackend, await_job, current_token
 from .qiskit_backend import qiskit_counts, to_qiskit
 
 
@@ -85,13 +91,16 @@ class IBMQuantumBackend(QuantumBackend):
         from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
         from qiskit_ibm_runtime import SamplerV2
 
+        tok = current_token()
         be = self._get(max(c.n_qubits for c in circuits))
         pm = generate_preset_pass_manager(optimization_level=2, backend=be)
         isa = pm.run([to_qiskit(c) for c in circuits], num_processes=1)
+        if tok is not None:
+            tok.raise_if_cancelled()  # transpiling can take a while: don't submit a job nobody wants
         sampler = SamplerV2(mode=be)
         t0 = time.perf_counter()
         job = sampler.run(isa, shots=shots)
-        result = job.result()
+        result = await_job(job, tok)  # untested live: cancel() -> RuntimeJobV2.cancel()
         total = time.perf_counter() - t0
         usage = None
         try:

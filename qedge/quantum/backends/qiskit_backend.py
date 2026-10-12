@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 
 from ..circuit import Circuit, normalise_counts
-from .base import NoiseSpec, QuantumBackend
+from .base import NoiseSpec, QuantumBackend, await_job, current_token
 
 
 def to_qiskit(c: Circuit, measure: bool = True):
@@ -141,6 +141,11 @@ class CalibratedIBMBackend(QuantumBackend):
     calibration snapshots of real IBM devices and runs on a local emulator of
     the chosen one (that device's own noise model), so the whole decision path
     can be exercised for free.
+
+    Under a ``CancelToken`` (race mode) it checks the token once the layout
+    search is done, before submitting or emulating. On a live device the
+    Runtime job is registered on the token so a cancel reaches IBM (untested:
+    no account was available); the local emulation, once started, runs to the end.
     """
 
     framework = "qiskit"
@@ -199,17 +204,31 @@ class CalibratedIBMBackend(QuantumBackend):
         # Circuits that differ only in angles share a layout (e.g. every QAOA iteration).
         return (c.n_qubits, tuple((g.name, g.qubits) for g in c.gates))
 
+    @staticmethod
+    def _signature(c: Circuit) -> tuple:
+        return (c.n_qubits, tuple((g.name, g.qubits, g.params) for g in c.gates))
+
     def choose(self, c: Circuit):
+        return self._choose(c)[0]
+
+    def _choose(self, c: Circuit):
+        """(layout choice, signature of the exact circuit it was searched on). Stored as one
+        tuple so concurrent callers never pair one circuit's choice with another's signature."""
         from ..calibration import select_device
         key = self._structure(c)
-        if key not in self._layouts:
+        hit = self._layouts.get(key)
+        if hit is None:
             best, _ = select_device(to_qiskit(c), self.devices, queue_weight=self.queue_weight)
-            self._layouts[key] = best
-        return self._layouts[key]
+            hit = self._layouts[key] = (best, self._signature(c))
+        return hit
 
-    def _isa(self, c: Circuit, choice):
+    def _isa(self, c: Circuit, choice, source: tuple):
         from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
-        if self._structure(c) == self._structure(self._chosen_for):
+        # choice.circuit is the transpiled copy of the circuit the layout was searched on,
+        # angles included. Reusing it for a circuit that only shares the structure would
+        # run the old angles (every QAOA iteration would repeat the first one), so any
+        # other circuit is transpiled onto the same layout.
+        if self._signature(c) == source:
             return choice.circuit
         cal = next(d for d in self.devices if d.name == choice.device)
         pm = generate_preset_pass_manager(optimization_level=1, backend=cal.backend,
@@ -217,21 +236,25 @@ class CalibratedIBMBackend(QuantumBackend):
         return pm.run(to_qiskit(c))
 
     def _run(self, circuits, shots):
+        # Layout and ISA are local to this call: a race can leave an abandoned emulator
+        # thread still inside _run while the next job uses the same backend.
         big = max(circuits, key=lambda c: (c.n_qubits, len(c.gates)))
-        choice = self.choose(big)
-        self._chosen_for = big
+        choice, source = self._choose(big)
         self.last_choice = choice
         cal = next(d for d in self.devices if d.name == choice.device)
-        isa = [self._isa(c, choice) for c in circuits]
+        isa = [self._isa(c, choice, source) for c in circuits]
         meta = {"device": choice.device, "calibration": cal.source, "layout": choice.layout,
                 "predicted_esp": choice.esp, "qiskit_default_esp": choice.default_esp,
                 "transpiled_depths": [qc.depth() for qc in isa]}
+        tok = current_token()
+        if tok is not None:
+            tok.raise_if_cancelled()  # the layout search may have outlived the deadline: don't submit
         if self.live:
             from qiskit_ibm_runtime import SamplerV2
             import time as _t
             t0 = _t.perf_counter()
             job = SamplerV2(mode=cal.backend).run(isa, shots=shots)
-            result = job.result()
+            result = await_job(job, tok)  # untested live: cancel() -> RuntimeJobV2.cancel()
             total = _t.perf_counter() - t0
             try:
                 usage = job.usage()
