@@ -5,10 +5,15 @@ tier was chosen; network transfer for cloud tiers is added from the model,
 not slept). Quantum work runs on a real quantum stack: a local simulator from
 any of the four SDKs, the IBM device emulator, or real IBM / Braket hardware
 when credentials are configured.
+
+``run(w, q, cancel=token)`` hands the quantum path a backend bound to a
+``CancelToken``, so race mode can stop it: every circuit job checks the token
+first, which ends a QAOA loop or a chunked kernel at its next job.
 """
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -19,6 +24,7 @@ from .classical.solvers import maxcut_annealing
 from .quantum.algorithms import (magnetisation, maxcut_optimum, quantum_kernel, random_graph, run_qaoa,
                                  tfim_exact_magnetisation, tfim_trotter)
 from .quantum.backends import QuantumBackend, get_backend
+from .quantum.backends.base import CancellableBackend, CancelToken
 
 HW_MAX_CIRCUITS = int(os.environ.get("QEDGE_HW_MAX_CIRCUITS", "60"))
 HW_MAX_SHOTS = int(os.environ.get("QEDGE_HW_MAX_SHOTS", "2000"))
@@ -93,24 +99,31 @@ class Executor:
         self.sim_stack = sim_stack
         self.qpu_stack = qpu_stack
         self._backends: dict[str, QuantumBackend] = {}
+        self._lock = threading.Lock()  # race mode calls backend_for from worker threads
 
-    def backend_for(self, quantum_resource: str) -> QuantumBackend:
+    def backend_for(self, quantum_resource: str, cancel: CancelToken | None = None) -> QuantumBackend:
         name = self.sim_stack if quantum_resource == "quantum_sim" else self.qpu_stack
-        if name not in self._backends:
-            self._backends[name] = get_backend(name)
-        return self._backends[name]
+        with self._lock:
+            if name not in self._backends:
+                self._backends[name] = get_backend(name)
+            be = self._backends[name]
+        # The shared backend stays unbound; the token only governs this call's work.
+        return CancellableBackend(be, cancel) if cancel is not None else be
 
     # ------------------------------------------------------------------
-    def run(self, w, quantum_resource: str | None = None) -> ExecResult:
+    def run(self, w, quantum_resource: str | None = None, cancel: CancelToken | None = None) -> ExecResult:
+        """Execute ``w`` classically (``quantum_resource=None``) or hybrid. With
+        ``cancel``, the quantum path raises ``Cancelled`` at its next circuit job
+        once the token fires."""
         fn = getattr(self, f"_{w.kind}")
-        return fn(w, quantum_resource)
+        return fn(w, quantum_resource, cancel)
 
     def _guard(self, be: QuantumBackend, n_circ: int, shots: int):
         if be.hardware and (n_circ > HW_MAX_CIRCUITS or shots > HW_MAX_SHOTS):
             raise RuntimeError(f"refusing {n_circ} circuits x {shots} shots on real hardware "
                                f"(limits QEDGE_HW_MAX_CIRCUITS={HW_MAX_CIRCUITS}, QEDGE_HW_MAX_SHOTS={HW_MAX_SHOTS})")
 
-    def _inference(self, w, q):
+    def _inference(self, w, q, cancel=None):
         Xtr, Xte, ytr, yte = _digits()
         batch = int(w.params.get("batch", 8))
         rng = np.random.default_rng(w.id)
@@ -122,7 +135,7 @@ class Executor:
         return ExecResult("inference", "classical", "mlp", float((pred == yte[idx]).mean()), "accuracy", dt,
                           details={"batch": batch})
 
-    def _training(self, w, q):
+    def _training(self, w, q, cancel=None):
         from sklearn.neural_network import MLPClassifier
         Xtr, Xte, ytr, yte = _digits()
         n = min(int(w.params.get("samples", 800)), len(Xtr))
@@ -136,7 +149,7 @@ class Executor:
         return ExecResult("training", "classical", "mlp-sgd", float(m.score(Xte, yte)), "test accuracy", dt,
                           details={"samples": n})
 
-    def _optimization(self, w, q):
+    def _optimization(self, w, q, cancel=None):
         n = int(w.params["n"])
         edges = random_graph(n, w.params.get("density", 0.3), seed=w.id)
         ref = maxcut_optimum(n, edges) if n <= 20 else maxcut_annealing(n, edges, sweeps=3000, seed=99)[1]
@@ -149,7 +162,7 @@ class Executor:
             dt = time.perf_counter() - t0
             return ExecResult("optimization", "classical", method, val / ref, "approximation ratio", dt,
                               details={"n": n, "edges": len(edges), "cut": val, "reference": ref})
-        be = self.backend_for(q)
+        be = self.backend_for(q, cancel)
         iters = 8 if be.hardware else 25
         shots = 512 if be.hardware else 1000
         self._guard(be, 12 + iters + 1, shots)
@@ -161,7 +174,7 @@ class Executor:
                           {"n": n, "edges": len(edges), "cut": r.best_cut, "expected_cut": r.expected_cut,
                            "reference": ref, "circuit_evals": r.n_circuit_evals, "jobs": r.n_jobs, "wall_s": dt})
 
-    def _kernel_classification(self, w, q):
+    def _kernel_classification(self, w, q, cancel=None):
         from sklearn.svm import SVC
         d = int(w.params["features"])
         n_train, n_test = int(w.params["n_train"]), int(w.params["n_test"])
@@ -171,7 +184,7 @@ class Executor:
             acc = SVC(kernel="rbf", C=1.0, gamma="scale").fit(Xtr, ytr).score(Xte, yte)
             return ExecResult("kernel_classification", "classical", "RBF-SVM", float(acc), "test accuracy",
                               time.perf_counter() - t0, details={"features": d, "n_train": n_train})
-        be = self.backend_for(q)
+        be = self.backend_for(q, cancel)
         n_circ = n_train * (n_train - 1) // 2 + n_test * n_train
         self._guard(be, n_circ, 500)
         bw = KERNEL_BANDWIDTH(d)  # narrower feature map avoids an all-diagonal kernel
@@ -184,7 +197,7 @@ class Executor:
                           getattr(be, "fallback_from", None),
                           {"features": d, "n_train": n_train, "circuits": m1["n_circuits"] + m2["n_circuits"]})
 
-    def _quantum_simulation(self, w, q):
+    def _quantum_simulation(self, w, q, cancel=None):
         n, steps = int(w.params["n"]), int(w.params["steps"])
         if n > 20:
             raise ValueError("live execution keeps quantum_simulation at <= 20 qubits so it can be verified exactly")
@@ -194,7 +207,7 @@ class Executor:
         if q is None:
             return ExecResult("quantum_simulation", "classical", "state vector", 1.0, "1 - |error| in <Z>",
                               t_exact, details={"n": n, "steps": steps, "magnetisation": exact})
-        be = self.backend_for(q)
+        be = self.backend_for(q, cancel)
         self._guard(be, 1, 4000)
         r = be.run([tfim_trotter(n, steps)], shots=4000)
         m = magnetisation(r.counts[0])

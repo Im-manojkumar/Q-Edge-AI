@@ -4,31 +4,172 @@
     orch = Orchestrator(qpu_stack="ibm-auto")     # best real IBM device if QISKIT_IBM_TOKEN is set
     report = orch.submit("optimization", n=8)
     print(report.explain())
+
+Race mode hedges a QPU placement against its queue, which is seconds to hours
+and only partly observable before submitting:
+
+    report = orch.submit("quantum_simulation", n=8, steps=3, force="cloud_cpu+qpu", race=True, deadline_s=5)
+
+The quantum path and the best feasible classical placement start together. The
+QPU result is delivered if it arrives before the deadline; otherwise the
+classical one is, and the QPU work is cancelled. That caps what a wrong guess
+about the queue can cost at the deadline, in exchange for always doing the
+classical work too.
+
+Caveat: here both paths run on this one machine (the "QPU" is a local emulator
+of an IBM device), so they compete for CPU and for Python's GIL. The classical
+side can run slower than it would alone, and the thread waiting for the
+deadline can wake late while the emulator holds the GIL, so a fallback can be
+delivered somewhat after the deadline (``RaceInfo.overshoot_s``). Race timings
+are not the timings either path would have on its own hardware; on a real QPU
+the quantum thread mostly waits on the network, which releases the GIL.
 """
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import time
-from dataclasses import asdict, dataclass
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from dataclasses import asdict, dataclass, field
 
 import psutil
 
 from ..executor import ExecResult, Executor
 from ..quantum.backends import CalibratedIBMBackend
+from ..quantum.backends.base import Cancelled, CancelToken
 from ..resources import Resource, ResourceState, load_catalogue
 from ..workloads import BUILDERS, Workload, load_calibration
-from .estimator import Placement
+from .estimator import Estimate, Placement
 from .policies import Decision, Policy, make_policy
+
+log = logging.getLogger(__name__)
+
+
+def _fmt(e: BaseException) -> str:
+    return f"{type(e).__name__}: {e}"
+
+
+@dataclass
+class RaceInfo:
+    """What happened when a QPU placement was raced against a classical fallback.
+
+    Times are wall-clock seconds from submission (planning included), the clock
+    the deadline is measured on. ``quantum_status``:
+
+      completed  the QPU result arrived before the deadline and was delivered
+      failed     the QPU path raised before the deadline; the classical result was delivered
+      cancelled  the deadline passed, the QPU work was cancelled and stopped
+                 (``Cancelled`` at its next job, or the provider cancelled it)
+      late       the QPU work could not be stopped and finished after the deadline;
+                 its result is kept in ``quantum_result`` but was not delivered
+                 (or was, marked late, if the classical fallback had failed)
+
+    A local emulator cannot be interrupted inside a job, so after a cancel its
+    thread keeps running in the background until the job ends. Until then
+    ``quantum_settled`` is False and the status is provisional; ``wait_settled()``
+    blocks until it settles.
+    """
+
+    raced: bool = False
+    reason: str = ""                          # why there was no race
+    deadline_s: float | None = None
+    fallback: str | None = None               # classical placement raced against the QPU
+    winner: str | None = None                 # "quantum" | "classical" | None (nothing to deliver)
+    quantum_status: str | None = None
+    quantum_settled: bool = True
+    quantum_wall_s: float | None = None       # when the QPU path ended
+    classical_wall_s: float | None = None     # when the classical path ended
+    delivered_s: float | None = None          # when the delivered result was handed back
+    qpu_ran_before_cancel_s: float | None = None
+    quantum_error: str | None = None
+    classical_error: str | None = None
+    jobs_cancelled: list[str] = field(default_factory=list)   # provider job ids (live hardware only)
+    cancel_errors: list[str] = field(default_factory=list)
+    classical_result: ExecResult | None = None
+    quantum_result: ExecResult | None = None
+
+    def wait_settled(self, timeout: float | None = None) -> bool:
+        """Block until both race threads have ended and been recorded (an abandoned
+        QPU thread keeps running after delivery). True once settled."""
+        futs: tuple[Future, ...] = getattr(self, "_futures", ())
+        if not futs:
+            return self.quantum_settled
+        wait(futs, timeout=timeout)
+        end = time.perf_counter() + 1.0  # done-callbacks run just after a future completes
+        while not self._settled() and all(f.done() for f in futs) and time.perf_counter() < end:
+            time.sleep(0.005)
+        return self._settled()
+
+    def _settled(self) -> bool:
+        return self.quantum_settled and (self.classical_wall_s is not None or not self.raced)
+
+    @property
+    def overshoot_s(self) -> float | None:
+        """How far past the deadline the result was delivered (measured wall clock, no
+        modelled network). A fallback handed over at the deadline is always a few ms
+        late; much more means the waiting thread could not get the GIL in time."""
+        if not self.raced or self.delivered_s is None or self.winner is None:
+            return None
+        return max(0.0, self.delivered_s - self.deadline_s)
+
+    def row(self) -> dict:
+        """Flat summary for tables and CSVs."""
+        q, c = self.quantum_result, self.classical_result
+        return {"raced": self.raced, "reason": self.reason, "deadline_s": self.deadline_s,
+                "fallback": self.fallback, "winner": self.winner, "quantum_status": self.quantum_status,
+                "quantum_settled": self.quantum_settled, "quantum_wall_s": self.quantum_wall_s,
+                "classical_wall_s": self.classical_wall_s, "delivered_s": self.delivered_s,
+                "overshoot_s": self.overshoot_s, "qpu_ran_before_cancel_s": self.qpu_ran_before_cancel_s,
+                "quantum_quality": q.quality if q else None, "classical_quality": c.quality if c else None,
+                "quantum_error": self.quantum_error, "classical_error": self.classical_error}
+
+    def summary(self) -> str:
+        if not self.raced:
+            return f"race: {self.reason}"
+        head = f"race vs {self.fallback} (deadline {self.deadline_s:.3g}s): "
+        cw = f"ready at {self.classical_wall_s:.3g}s" if self.classical_wall_s is not None else "not finished"
+        if self.winner == "quantum" and self.quantum_status == "completed":
+            return head + f"QPU result delivered at {self.quantum_wall_s:.3g}s; classical fallback {cw}"
+        if self.winner == "quantum":
+            return head + (f"classical fallback failed ({self.classical_error}); QPU result delivered late "
+                           f"at {self.quantum_wall_s:.3g}s")
+        if self.winner == "classical":
+            out = head + f"classical result ({cw}) delivered at {self.delivered_s:.3g}s; QPU {self.quantum_status}"
+            if self.quantum_status == "failed":
+                out += f" ({self.quantum_error})"
+            if self.qpu_ran_before_cancel_s is not None:
+                out += f" after running {self.qpu_ran_before_cancel_s:.3g}s"
+            if not self.quantum_settled:
+                out += ("; its thread is still finishing in the background (a local emulator cannot be "
+                        "interrupted mid-job) and its result will be discarded")
+            elif self.quantum_status == "late":
+                out += f"; it finished anyway at {self.quantum_wall_s:.3g}s and was discarded"
+            return out
+        return head + f"no result (QPU {self.quantum_status}: {self.quantum_error}; classical: {self.classical_error})"
 
 
 @dataclass
 class Report:
     workload: Workload
     decision: Decision
-    result: ExecResult | None
-    measured_latency_s: float
+    result: ExecResult | None    # in a race: the delivered result (QPU or classical fallback)
+    measured_latency_s: float    # in a race: wall clock to delivery + modelled network
     error: str | None = None
+    race: RaceInfo | None = None  # set only when submit(race=True)
+
+    @property
+    def raced(self) -> bool:
+        return bool(self.race and self.race.raced)
+
+    @property
+    def winner(self) -> str | None:
+        return self.race.winner if self.race else None
+
+    @property
+    def quantum_status(self) -> str | None:
+        return self.race.quantum_status if self.race else None
 
     def explain(self) -> str:
         lines = [self.decision.explain()]
@@ -40,17 +181,22 @@ class Report:
             lines.append(f"  executed {r.method} on {where}: {r.quality_metric} = {r.quality:.3f}, "
                          f"compute {r.compute_s:.3g}s, quantum {r.quantum_s:.3g}s, "
                          f"latency incl. modelled network {self.measured_latency_s:.3g}s")
+        if self.race is not None:
+            lines.append("  " + self.race.summary())
         if self.error:
             lines.append(f"  ERROR: {self.error}")
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
-        return {"workload": self.workload.to_dict(), "placement": self.decision.placement.label,
-                "policy": self.decision.policy, "predicted": self.decision.chosen.row(),
-                "alternatives": [e.row() for e in self.decision.estimates],
-                "quantum_checks": self.decision.quantum_checks,
-                "result": asdict(self.result) if self.result else None,
-                "measured_latency_s": self.measured_latency_s, "error": self.error}
+        d = {"workload": self.workload.to_dict(), "placement": self.decision.placement.label,
+             "policy": self.decision.policy, "predicted": self.decision.chosen.row(),
+             "alternatives": [e.row() for e in self.decision.estimates],
+             "quantum_checks": self.decision.quantum_checks,
+             "result": asdict(self.result) if self.result else None,
+             "measured_latency_s": self.measured_latency_s, "error": self.error}
+        if self.race is not None:  # absent unless a race was asked for, so old logs keep their shape
+            d["race"] = asdict(self.race)
+        return d
 
 
 class Monitor:
@@ -117,13 +263,33 @@ class Orchestrator:
         self._next_id += 1
         return w, self.policy.decide(w, self.monitor.snapshot(w))
 
-    def submit(self, kind: str, force: str | None = None, **params) -> Report:
+    def submit(self, kind: str, force: str | None = None, race: bool = False, deadline_s: float | None = None,
+               **params) -> Report:
+        """Plan one workload, execute it for real, and report.
+
+        force       run this placement label (e.g. "cloud_cpu+qpu") instead of the decision.
+        race        if the executed placement sends circuits to the QPU, also run the best
+                    feasible classical placement at the same time and deliver per ``_race``.
+                    No effect on any other placement (the report says why).
+        deadline_s  the workload's deadline, passed to the workload builder exactly as
+                    before; in a race it is also the wall-clock deadline from this call.
+                    Defaults to the deadline the builder draws.
+        """
+        t_submit = time.perf_counter()
+        if deadline_s is not None:
+            params["deadline_s"] = deadline_s
         w, d = self.plan(kind, **params)
         if force:  # run a specific placement anyway, e.g. to compare against the decision
             classical, _, quantum = force.partition("+")
             p = Placement(classical, quantum or None)
             est = next((e for e in d.estimates if e.placement == p), d.chosen)
             d = Decision(w, p, est, d.estimates, d.policy + " (forced)", d.quantum_checks)
+        race_info = None
+        if race:
+            fallback, why = self.race_fallback(d)
+            if fallback is not None:
+                return self._race(w, d, fallback, t_submit, float(w.deadline_s))
+            race_info = RaceInfo(raced=False, reason=why, deadline_s=float(w.deadline_s))
         result, err = None, None
         t0 = time.perf_counter()
         try:
@@ -137,9 +303,144 @@ class Orchestrator:
         latency = measured + modelled_network
         if result is not None:
             self.policy.observe(d, {"latency_s": latency, "quality": result.quality})
-        rep = Report(w, d, result, latency, err)
+        rep = Report(w, d, result, latency, err, race_info)
         self._log(rep)
         return rep
+
+    # ------------------------------------------------------------------ race mode
+    def uses_qpu(self, p: Placement) -> bool:
+        """True when ``p`` sends circuits to a QPU (not to a state-vector simulator)."""
+        if not p.is_hybrid:
+            return False
+        r = self.resources.get(p.quantum)
+        return not r.sim_gflops if r is not None else p.quantum != "quantum_sim"
+
+    def race_fallback(self, d: Decision) -> tuple[Estimate | None, str]:
+        """The classical placement to race against ``d``: lowest policy score among the
+        feasible non-hybrid estimates (lowest predicted latency for policies that do
+        not score). Returns (None, reason) when there is nothing to race."""
+        if not self.uses_qpu(d.placement):
+            return None, f"not raced: {d.placement.label} does not use a QPU"
+        classical = [e for e in d.estimates if not e.placement.is_hybrid]
+        feas = [e for e in classical if e.feasible]
+        if not feas:
+            why = "; ".join(f"{e.placement.label}: {', '.join(e.reasons) or 'infeasible'}" for e in classical)
+            return None, f"not raced: no feasible classical placement to fall back to ({why or 'none offered'})"
+
+        def key(e: Estimate):
+            s = e.score if e.score is not None and math.isfinite(e.score) else math.inf
+            return (s, e.latency_s)
+        return min(feas, key=key), ""
+
+    def _race(self, w: Workload, d: Decision, fallback: Estimate, t_submit: float, deadline: float) -> Report:
+        """Run the QPU path and ``fallback`` concurrently and pick what to deliver.
+
+        Rules: the QPU result is delivered if it arrives before the deadline. If the
+        QPU path raises first, the classical result is delivered. Otherwise, at the
+        deadline the QPU work is cancelled and the classical result is delivered,
+        waited for if it is not ready. One exception: if the classical path has
+        already failed by the deadline, cancelling would leave nothing, so the QPU
+        is left to finish and its result is delivered marked late.
+        """
+        token = CancelToken()
+        t_deadline = t_submit + deadline
+        marks: dict[str, float] = {}
+
+        def path(tag: str, q: str | None, cancel: CancelToken | None) -> ExecResult:
+            marks[f"{tag}_start"] = time.perf_counter()
+            try:
+                return self.executor.run(w, q, cancel=cancel)
+            finally:
+                marks[f"{tag}_end"] = time.perf_counter()
+
+        pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix=f"qedge-race-{w.id}")
+        fq = pool.submit(path, "q", d.placement.quantum, token)
+        fc = pool.submit(path, "c", None, None)
+        pool.shutdown(wait=False)  # never block on an abandoned QPU thread
+
+        info = RaceInfo(raced=True, deadline_s=deadline, fallback=fallback.placement.label)
+        wait([fq], timeout=max(0.0, t_deadline - time.perf_counter()))
+        result: ExecResult | None = None
+        if fq.done() and fq.exception() is None:
+            result, info.winner, info.quantum_status = fq.result(), "quantum", "completed"
+        elif fq.done():  # the QPU path raised before the deadline
+            exc = fq.exception()
+            info.quantum_status = "cancelled" if isinstance(exc, Cancelled) else "failed"
+            info.quantum_error = _fmt(exc)
+        elif fc.done() and fc.exception() is not None:  # no fallback left: let the QPU finish
+            wait([fq])
+            if fq.exception() is None:
+                result, info.winner, info.quantum_status = fq.result(), "quantum", "late"
+            else:
+                info.quantum_status, info.quantum_error = "failed", _fmt(fq.exception())
+        else:
+            token.cancel(f"race deadline {deadline:.3g}s reached")
+            info.quantum_status = "cancelled"
+            info.qpu_ran_before_cancel_s = token.cancelled_at - marks.get("q_start", token.cancelled_at)
+        if info.winner is None:
+            try:
+                result, info.winner = fc.result(), "classical"  # the fallback: wait for it if needed
+            except Exception as e:
+                info.classical_error = _fmt(e)
+        t_delivered = time.perf_counter()
+
+        info.delivered_s = t_delivered - t_submit
+        info._futures = (fq, fc)  # not a field: kept out of asdict / the log
+        c_done, q_done = fc.done(), fq.done()  # read once: callbacks below cover the rest
+        if c_done:
+            self._settle_classical(info, fc, marks, t_submit)
+        if q_done:
+            self._settle_quantum(info, fq, marks, t_submit, token)
+        else:
+            info.quantum_settled = False
+
+        # Delivered latency uses the same clock as the deadline; the winner's modelled
+        # network transfer is added as in the non-race path.
+        won = d.chosen if info.winner == "quantum" else fallback
+        latency = info.delivered_s + (won.breakdown.get("transfer", 0.0) if result else 0.0)
+        err = None
+        if result is None:
+            err = (f"race: QPU {info.quantum_status} ({info.quantum_error}); "
+                   f"classical fallback failed ({info.classical_error})")
+        else:
+            # Feedback on the delivered placement, measured as outside a race. A cancelled QPU
+            # run only tells us it took longer than the deadline (censored), so it is not fed back.
+            fd = d if info.winner == "quantum" else Decision(w, fallback.placement, fallback, d.estimates,
+                                                             d.policy + " (race fallback)", d.quantum_checks)
+            self.policy.observe(fd, {"latency_s": result.compute_s + result.quantum_s
+                                     + won.breakdown.get("transfer", 0.0), "quality": result.quality})
+        rep = Report(w, d, result, latency, err, info)
+        log.info("workload %s: %s", w.id, info.summary())
+        self._log(rep)
+        if not q_done:
+            fq.add_done_callback(lambda f: self._settle_quantum(info, f, marks, t_submit, token))
+        if not c_done:  # the QPU won; the local classical path is short and left to finish
+            fc.add_done_callback(lambda f: self._settle_classical(info, f, marks, t_submit))
+        return rep
+
+    @staticmethod
+    def _settle_classical(info: RaceInfo, fc: Future, marks: dict, t_submit: float):
+        info.classical_wall_s = marks.get("c_end", time.perf_counter()) - t_submit
+        exc = fc.exception()
+        if exc is None:
+            info.classical_result = fc.result()
+        elif info.classical_error is None:
+            info.classical_error = _fmt(exc)
+
+    @staticmethod
+    def _settle_quantum(info: RaceInfo, fq: Future, marks: dict, t_submit: float, token: CancelToken):
+        """Record how the QPU path ended (possibly after the report was delivered)."""
+        info.quantum_wall_s = marks.get("q_end", time.perf_counter()) - t_submit
+        exc = fq.exception()
+        if exc is None:
+            info.quantum_result = fq.result()
+            if info.winner != "quantum":
+                info.quantum_status = "late"  # ran to the end after the deadline; discarded
+        elif info.quantum_error is None:
+            info.quantum_error = _fmt(exc)
+        info.jobs_cancelled = list(token.jobs_cancelled)
+        info.cancel_errors = list(token.job_cancel_errors)
+        info.quantum_settled = True
 
     def _log(self, rep: Report):
         if not self.log_path:

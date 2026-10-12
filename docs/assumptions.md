@@ -67,3 +67,24 @@ quality, so it is used to *rank* devices and layouts.
 The scheduler sees the nominal figures above, slot queues on every resource, ping RTT, and the queue estimate
 a provider publishes. It does not see true bandwidth, thermal throttling, or the real QPU queue. In the
 simulator those hidden values come from the scenario; the adaptive policy has to learn them from feedback.
+
+## Race mode (`submit(..., race=True)`)
+
+| Figure | Value | Basis |
+|---|---|---|
+| Fallback raced against the QPU | lowest-score feasible classical placement in the decision | same score the policy ranks with; lowest predicted latency for policies that do not score |
+| Deadline | `deadline_s`, else the workload's own deadline, wall clock from `submit()` | planning time counts against it |
+| Cancellation granularity | one backend `run()` call | every `run()` checks the token first; an SDK call already in progress is not interrupted |
+| Feedback to the adaptive policy | the delivered placement only, measured as outside a race | a cancelled QPU run only says "slower than the deadline" (censored), so it is not fed back |
+
+* Local emulators cannot be stopped mid-job. After a cancel the abandoned thread finishes its current job in the
+  background and its result is discarded. A QAOA run stops at its next `run()` call. `ibm-auto` also checks the
+  token after its layout search, before it emulates or submits. A script exits only once these threads have ended.
+* On live IBM hardware the Runtime job is registered on the token, and cancelling it calls `RuntimeJobV2.cancel()`.
+  If IBM refuses (the job already finished), the result arrives and is discarded. This path follows the
+  qiskit-ibm-runtime 0.50 API but has **not** been run against a live account.
+* Both paths run on one machine here, so they compete for CPU and for Python's GIL. The emulator holds the GIL for
+  long stretches, so the thread waiting for the deadline can wake late. The report records this as
+  `overshoot_s`. Race timings are therefore not the timings either path would have on its own hardware.
+* When the QPU wins, the classical path is not stopped (it is local and short here). Its result is recorded when
+  it finishes.
