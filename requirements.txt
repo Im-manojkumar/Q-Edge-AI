@@ -1,0 +1,16 @@
+qiskit>=2.0
+qiskit-aer>=0.17
+qiskit-ibm-runtime>=0.40
+pennylane>=0.43
+cirq-core>=1.5
+amazon-braket-sdk>=1.90
+scikit-learn>=1.5
+scipy>=1.13
+numpy>=2.0
+pandas>=2.2
+matplotlib>=3.9
+plotly>=5.22
+streamlit>=1.40
+psutil>=5.9
+pyyaml>=6.0
+pytest>=8.0

@@ -1,0 +1,12 @@
+# Override any resource figure from qedge/resources.py, then run with
+#   QEDGE_CONFIG=configs/default.yaml python -m qedge ...
+# Only the keys you list change. Examples (commented out = defaults are used):
+resources:
+  # edge_gpu:
+  #   gflops: 1200          # e.g. a Jetson Orin NX instead of an Orin Nano
+  # qpu:
+  #   p2: 0.002             # a device with better two-qubit gates
+  #   queue_mean_s: 30
+  #   cost_per_task: 0.0    # IBM Open Plan minutes are free
+  #   cost_per_shot: 0.0
+  edge_cpu: {}
