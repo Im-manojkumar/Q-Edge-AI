@@ -155,6 +155,23 @@ def test_split_counts_bit_order(torino):
         P.split_counts(job, {"1 0": 1})
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_split_counts_from_sampler_v2_registers(small):
+    """The live path reads SamplerV2's per-register counts; check that bit order on a
+    real SamplerV2 result (local mode, ideal Aer), plus its joined bitstrings."""
+    from qiskit_aer import AerSimulator
+    from qiskit_ibm_runtime import SamplerV2
+    a = Circuit(3, name="a")
+    a.x(0).cx(0, 1)
+    b = Circuit(2, name="b")
+    b.x(1)
+    job = P.pack(small, [a, b], buffer=1)
+    pub = SamplerV2(mode=AerSimulator()).run([job.circuit], shots=32).result()[0]
+    per_reg = {r: getattr(pub.data, r).get_counts() for r in job.registers}
+    assert P.split_counts(job, per_reg) == [{"110": 32}, {"01": 32}]
+    assert P.split_counts(job, pub.join_data().get_counts()) == [{"110": 32}, {"01": 32}]
+
+
 # ---- emulation -------------------------------------------------------------------
 def test_per_program_emulation_matches_joint(small):
     job = P.pack(small, [ghz(3), tfim_trotter(3, 2)], buffer=0)
@@ -250,3 +267,33 @@ def test_run_packed_workloads_skips_and_scores():
     assert r.cost.k == 2 and r.results[0]["qpu_s_share"] == pytest.approx(r.cost.qpu_s_job / 2)
     with pytest.raises(ValueError):
         P.run_packed_workloads(be, ws[2:])
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_run_packed_workloads_live_branch_in_local_mode(small):
+    """A calibration marked live takes the SamplerV2 branch; with a fake backend
+    qiskit-ibm-runtime runs it locally, so the submission and split are exercised."""
+    cal = copy.copy(small)
+    cal.source = "live"
+    ws = [make_workload("quantum_simulation", 0, seed=0, n=3, steps=2),
+          make_workload("quantum_simulation", 1, seed=1, n=4, steps=2)]
+    with pytest.raises(RuntimeError, match="QEDGE_HW_MAX_SHOTS"):
+        P.run_packed_workloads(cal, ws, shots=10 ** 6)
+    r = P.run_packed_workloads(cal, ws, shots=1000, buffer=1)
+    assert not r.emulated and r.calibration == "live" and len(r.job_ids) == 1
+    assert [row["workload"] for row in r.results] == [0, 1]
+    assert all(0.5 < row["quality"] <= 1.0 for row in r.results)
+
+
+def test_loss_standard_error_counts_shared_solo_draw_once():
+    import pandas as pd
+    from qedge.experiments import e7_packing as E
+    se = E.fidelity_se(0.99, 4000)
+    assert se == pytest.approx(np.sqrt(0.99 * 0.01 / 4000))
+    # k copies of one circuit: k independent packed draws, ONE shared solo draw
+    k = 4
+    g = pd.DataFrame({"fidelity_packed_se": [se] * k, "fidelity_solo_se": [se] * k, "solo_id": [0] * k})
+    assert E.loss_se(g) == pytest.approx(np.sqrt(k * se ** 2 + k ** 2 * se ** 2) / k)
+    # k distinct circuits: the solo term averages down like the packed one
+    g["solo_id"] = range(k)
+    assert E.loss_se(g) == pytest.approx(np.sqrt(2 * k * se ** 2) / k)

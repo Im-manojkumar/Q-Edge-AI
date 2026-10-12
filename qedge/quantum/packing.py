@@ -207,7 +207,10 @@ def _place_template(cal: C.DeviceCalibration, t: _Template, free: set[int],
     terms as ``calibration.esp``. Couplers with error >= BROKEN are not in the
     graph, so they can never be used. Placing components one at a time avoids
     enumerating the product of independent placements (millions for a QAOA graph
-    with isolated vertices)."""
+    with isolated vertices). It is exact for a single-component program and
+    whenever components do not want the same qubits; when they do, a later
+    component takes the best qubits left, so the result is greedy, not a proven
+    joint optimum."""
     import rustworkx as rx
 
     mapping: dict[int, int] = {}
@@ -510,8 +513,11 @@ def crosstalk_noise_model(cal: C.DeviceCalibration, couplers, factor: float):
     ASSUMPTION (labelled): crosstalk is modelled as a multiplicative increase of
     the 2q gate error on couplers that touch a qubit adjacent to another
     program, applied to every such gate whether or not a neighbouring gate runs
-    at the same moment (conservative: no timing model). ``factor == 1`` returns
-    the unmodified base model.
+    at the same moment (conservative about timing: no timing model). Other
+    crosstalk channels (always-on ZZ coupling to a neighbour's idle qubits,
+    1q gates, readout) are not modelled at all, so the model as a whole is a
+    scenario, not a bound. ``factor == 1`` returns the unmodified base model
+    (the cached object itself: copy it before changing it).
 
     Checked empirically on qiskit-aer 0.17: ``add_quantum_error`` on an
     (instruction, qubits) pair that already carries the backend's error APPENDS
@@ -706,11 +712,12 @@ def run_packed_workloads(backend_or_cal, workloads: list, shots: int = 4000, buf
 
     With a live ``CalibratedIBMBackend`` the one joint circuit is submitted
     through SamplerV2 and each register is read back separately, subject to the
-    executor's hardware shot limit (QEDGE_HW_MAX_SHOTS). That path follows the
-    qiskit-ibm-runtime 0.50 API but has NOT been run here (no IBM account);
-    everything else runs on the local emulator of the chosen device, where
-    ``crosstalk_factor`` applies (on hardware the device's own crosstalk
-    applies instead)."""
+    executor's hardware shot limit (QEDGE_HW_MAX_SHOTS). That branch is
+    exercised in tests through qiskit-ibm-runtime's local mode (SamplerV2 on a
+    fake backend, which runs Aer), so the submission and per-register split
+    are checked; it has NOT run against a real IBM account. Everything else
+    runs on the local emulator of the chosen device, where ``crosstalk_factor``
+    applies (on hardware the device's own crosstalk applies instead)."""
     from ..executor import HW_MAX_SHOTS, representative_circuit
     from .algorithms import magnetisation, tfim_exact_magnetisation
 
@@ -728,7 +735,7 @@ def run_packed_workloads(backend_or_cal, workloads: list, shots: int = 4000, buf
     cal, alloc = select_packing_device(devices, circuits, buffer, queue_weight)
     job = pack(cal, circuits, buffer, allow_partial=True, allocation=alloc)
     usage, job_ids = None, []
-    if live and cal.source == "live":  # pragma: no cover - needs an IBM account
+    if live and cal.source == "live":  # tested in local mode only (fake backend), never on a real account
         if shots > HW_MAX_SHOTS:
             raise RuntimeError(f"refusing {shots} shots on real hardware (limit QEDGE_HW_MAX_SHOTS={HW_MAX_SHOTS})")
         from qiskit_ibm_runtime import SamplerV2
@@ -738,7 +745,7 @@ def run_packed_workloads(backend_or_cal, workloads: list, shots: int = 4000, buf
         job_ids = [rjob.job_id()]
         try:
             usage = float(rjob.usage())
-        except Exception:
+        except Exception:  # usage metering is optional; the counts are what matter
             usage = None
         emulated = False
     else:

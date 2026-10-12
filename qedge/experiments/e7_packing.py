@@ -22,9 +22,17 @@ its ideal distribution (as in E6), compared with the same program run alone
 on its best-ESP placement on the same device. Crosstalk is an explicit,
 labelled assumption, not a measurement: the emulator has no crosstalk of its
 own, so factor 1 shows only the cost of worse qubits.
+
+Shot noise: each fidelity is estimated from a finite number of shots, so the
+summary carries ``loss_se``, the standard error of the fidelity loss, and
+``loss_z = fidelity_loss / loss_se``. A loss with |z| < 2 is not resolved from
+zero at this shot count. Identical programs share ONE solo run (the TFIM-4
+copies all compare against the same solo draw), so the solo term does not
+shrink with k and an unlucky solo draw shifts every k of a mix together.
 """
 from __future__ import annotations
 
+import math
 import os
 import time
 
@@ -77,6 +85,17 @@ def _key(circ) -> tuple:
     return (circ.n_qubits, tuple((g.name, g.qubits, g.params) for g in circ.gates))
 
 
+def fidelity_se(f: float, shots: int) -> float:
+    """Shot-noise standard error of a Hellinger fidelity estimated from ``shots``.
+
+    Delta method: with F = (sum_k sqrt(p_k q_k))^2 and q estimated from a
+    multinomial sample, Var(F_hat) ~= F (1 - F) / shots. Checked against the
+    spread of 60 independent 4000-shot runs of each mixed-set program on both
+    devices: it matched the empirical SD to within 0-30%, never below it."""
+    f = min(max(float(f), 0.0), 1.0)
+    return math.sqrt(f * (1 - f) / shots)
+
+
 def _solo(cal, circs: dict, shots: int, seed: int) -> dict[tuple, dict]:
     """Each distinct program alone on its best-ESP placement (nothing blocked), base
     device noise; run twice with different seeds to show the shot-noise floor."""
@@ -90,7 +109,7 @@ def _solo(cal, circs: dict, shots: int, seed: int) -> dict[tuple, dict]:
     for i, (k, p) in enumerate(zip(keys, pl)):
         ideal = _ideal(circs[k])
         f = [_hellinger(ideal, qiskit_counts(r.get_counts(i), p.n_clbits)) for r in runs]
-        out[k] = {"fidelity": f[0], "fidelity_repeat": f[1], "esp": p.esp, "depth": p.depth,
+        out[k] = {"id": i, "fidelity": f[0], "fidelity_repeat": f[1], "esp": p.esp, "depth": p.depth,
                   "region": p.qubits}
     return out
 
@@ -134,6 +153,8 @@ def run(quick: bool = False, shots: int = SHOTS, seed: int = SEED) -> dict[str, 
                                      "fidelity_packed": f, "fidelity_solo": s["fidelity"],
                                      "fidelity_solo_repeat": s["fidelity_repeat"],
                                      "fidelity_loss": s["fidelity"] - f,
+                                     "solo_id": s["id"], "fidelity_packed_se": fidelity_se(f, shots),
+                                     "fidelity_solo_se": fidelity_se(s["fidelity"], shots),
                                      "exposed_couplers": len(job.exposed.get(p.index, [])),
                                      "two_q_count": p.two_q_count, "depth": p.depth, "solo_depth": s["depth"],
                                      "layouts_scored": p.n_layouts_scored, "exhaustive": p.exhaustive,
@@ -145,17 +166,37 @@ def run(quick: bool = False, shots: int = SHOTS, seed: int = SEED) -> dict[str, 
     return {"e7_packing": df, "e7_packing_summary": summarise(df, shots)}
 
 
+def loss_se(g: pd.DataFrame) -> float:
+    """Standard error of mean(solo) - mean(packed) over the k programs of one setting.
+
+    Packed runs are independent draws; identical programs share one solo draw
+    (``solo_id``), so the solo term is sum_c n_c^2 se_c^2 / k^2 and does not
+    shrink with k for a mix of copies. Draws are treated as independent; the
+    few packed runs that happen to reuse a solo run's seed on the same qubits
+    are positively correlated with it, so this errs on the large side."""
+    k = len(g)
+    var_p = float((g.fidelity_packed_se ** 2).sum())
+    solo = g.groupby("solo_id").agg(n=("fidelity_solo_se", "size"), se=("fidelity_solo_se", "first"))
+    var_s = float((solo.n ** 2 * solo.se ** 2).sum())
+    return math.sqrt(var_p + var_s) / k
+
+
 def summarise(df: pd.DataFrame, shots: int = SHOTS) -> pd.DataFrame:
     out = []
     keys = ["device", "mix", "buffer", "crosstalk_factor", "k"]
     for (dev, mix, buf, c, k), g in df.groupby(keys, sort=False):
         first = g.iloc[0]
+        # Per-program yardstick only: |F(seed) - F(seed + 1)| of the solo runs, averaged.
         noise = float((g.fidelity_solo - g.fidelity_solo_repeat).abs().mean())
+        loss = float(g.fidelity_solo.mean() - g.fidelity_packed.mean())
+        se = loss_se(g)
         out.append({"device": dev, "mix": mix, "buffer": int(buf), "crosstalk_factor": float(c), "k": int(k),
                     "capacity": int(first.capacity), "at_capacity": int(k) == int(first.capacity),
                     "mean_fidelity_packed": float(g.fidelity_packed.mean()),
                     "mean_fidelity_solo": float(g.fidelity_solo.mean()),
-                    "fidelity_loss": float(g.fidelity_solo.mean() - g.fidelity_packed.mean()),
+                    "fidelity_loss": loss,
+                    "loss_se": se, "loss_z": loss / se if se > 0 else 0.0,
+                    "loss_resolved": bool(se > 0 and abs(loss) >= 2 * se),
                     "worst_program_loss": float(g.fidelity_loss.max()),
                     "shot_noise_fidelity": noise,
                     "mean_esp_packed": float(g.esp_packed.mean()), "mean_esp_solo": float(g.esp_solo.mean()),
@@ -174,7 +215,8 @@ def summarise(df: pd.DataFrame, shots: int = SHOTS) -> pd.DataFrame:
                     "qpu_s_per_program_solo_with_overhead": float(first.cost_qpu_s_per_program_solo_with_overhead),
                     "all_placements_exhaustive": bool(g.exhaustive.all()),
                     "note": BUFFER1_NOTE if int(buf) >= 1 else
-                    ("no program adjacent to another at this k" if int(g.exposed_couplers.sum()) == 0 else "")})
+                    ("no coupler next to another program at this k, so the crosstalk factor has nothing to act on"
+                     if int(g.exposed_couplers.sum()) == 0 else "")})
     return pd.DataFrame(out)
 
 
@@ -194,8 +236,9 @@ def fidelity_figure(summ: pd.DataFrame, out: str):
         for c, mix in enumerate(mixes):
             ax = axes[r][c]
             d = summ[(summ.device == dev) & (summ.mix == mix)]
-            noise = d.shot_noise_fidelity.mean()
-            ax.axhspan(-noise, noise, color=F.GRID, alpha=0.6, lw=0)
+            # Band: +-2 standard errors of the plotted loss (largest over settings at each k).
+            band = d.groupby("k").loss_se.max().sort_index() * 2
+            ax.fill_between(band.index, -band.values, band.values, color=F.GRID, alpha=0.8, lw=0)
             ax.axhline(0, color=F.MUTED, lw=0.8)
             for buf, fac, label, col, ls in SETTINGS:
                 g = d[(d.buffer == buf) & (d.crosstalk_factor == fac)].sort_values("k")
@@ -220,7 +263,7 @@ def fidelity_figure(summ: pd.DataFrame, out: str):
         ax.set_xticks(ticks, [str(t) for t in ticks])
         ax.xaxis.set_minor_formatter(NullFormatter())
     axes[0][-1].legend(fontsize=7, loc="upper left")
-    axes[0][0].annotate("circle = greedy capacity (k shown)\nshaded = shot-noise level", xy=(0.03, 0.97),
+    axes[0][0].annotate("circle = greedy capacity (k shown)\nshaded = ±2 SE (shot noise of the loss)", xy=(0.03, 0.97),
                         xycoords="axes fraction", va="top", fontsize=7, color=F.MUTED)
     fig.suptitle("Job packing: quality cost of sharing one QPU job (emulated)", color=F.INK, x=0.01, ha="left")
     F._save(fig, out)

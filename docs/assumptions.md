@@ -79,7 +79,7 @@ job overhead, one task fee and one set of shots (spatial multi-programming, afte
 | Placement | greedy, largest program first, each on its highest-ESP free qubits | same ESP terms as `ibm-auto`; exhaustive search per connected component of the routed program |
 | Buffer | 1 coupling-map hop blocked around every program by default; 0 = programs may touch | adjacency counts every physical coupler, broken ones included |
 | Capacity | first program that does not fit stops the allocation; reported, never dropped | greedy, so capacity is a lower bound on what the chip could hold |
-| Crosstalk | **assumption**: factor c multiplies the 2q gate error on couplers that touch a qubit next to another program (buffer 0 only), added as extra depolarising error on top of the device noise | not measured; c = 1, 2, 5 are scenarios. Applied to every such gate, with no timing model (conservative). Murali et al. 2020 motivate it |
+| Crosstalk | **assumption**: factor c multiplies the 2q gate error on couplers that touch a qubit next to another program (buffer 0 only), added as extra depolarising error on top of the device noise | not measured; c = 1, 2, 5 are scenarios. Applied to every such gate, with no timing model (conservative about timing); ZZ coupling to a neighbour's idle qubits, 1q-gate and readout crosstalk are not modelled, so it is a scenario, not a bound. Murali et al. 2020 motivate it |
 | QPU seconds per job | shots × (250 µs + depth × 0.66 µs), depth = deepest packed program | catalogue QPU figures; per program = job / k |
 | Price per program | ($0.30 + shots × $0.00145) / k | Braket per-task / per-shot pricing applied to every device as an assumption (Braket does not sell IBM devices) |
 | Free-plan throughput | 600 s / QPU seconds per program | IBM Open Plan: 10 QPU minutes per 28 days; IBM's metered usage also includes some per-job overhead, shown as a sensitivity column |
@@ -89,3 +89,8 @@ noise models, whose errors are local to the qubits each gate touches, so program
 product output distribution (checked in `tests/test_packing.py`). The emulator has no crosstalk and no idle
 noise of its own: a short program packed with a long one is not charged for any waiting. Whether it waits on
 hardware, and in which state, depends on how the provider schedules the joint circuit; that is not modelled.
+
+Fidelity loss in E7 is a difference of shot-based Hellinger fidelities, so it carries shot noise. The summary
+reports `loss_se` (delta-method standard error, sqrt(F(1 - F)/shots) per fidelity, checked against 60 repeated
+runs to be 0-30% on the large side) and `loss_z`; a loss with |z| < 2 is not resolved at 4000 shots. Identical
+programs share one solo run, so for k copies of one circuit the solo term of the error does not shrink with k.
