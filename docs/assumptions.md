@@ -67,3 +67,25 @@ quality, so it is used to *rank* devices and layouts.
 The scheduler sees the nominal figures above, slot queues on every resource, ping RTT, and the queue estimate
 a provider publishes. It does not see true bandwidth, thermal throttling, or the real QPU queue. In the
 simulator those hidden values come from the scenario; the adaptive policy has to learn them from feedback.
+
+## Job packing (E7, `qedge/quantum/packing.py`)
+
+Several small circuits from different clients run side by side in one QPU job, sharing one queue wait, one
+job overhead, one task fee and one set of shots (spatial multi-programming, after Das et al. 2019, QuCloud
+2021 and Ohkura et al. 2022).
+
+| Figure | Value | Basis |
+|---|---|---|
+| Placement | greedy, largest program first, each on its highest-ESP free qubits | same ESP terms as `ibm-auto`; exhaustive search per connected component of the routed program |
+| Buffer | 1 coupling-map hop blocked around every program by default; 0 = programs may touch | adjacency counts every physical coupler, broken ones included |
+| Capacity | first program that does not fit stops the allocation; reported, never dropped | greedy, so capacity is a lower bound on what the chip could hold |
+| Crosstalk | **assumption**: factor c multiplies the 2q gate error on couplers that touch a qubit next to another program (buffer 0 only), added as extra depolarising error on top of the device noise | not measured; c = 1, 2, 5 are scenarios. Applied to every such gate, with no timing model (conservative). Murali et al. 2020 motivate it |
+| QPU seconds per job | shots × (250 µs + depth × 0.66 µs), depth = deepest packed program | catalogue QPU figures; per program = job / k |
+| Price per program | ($0.30 + shots × $0.00145) / k | Braket per-task / per-shot pricing applied to every device as an assumption (Braket does not sell IBM devices) |
+| Free-plan throughput | 600 s / QPU seconds per program | IBM Open Plan: 10 QPU minutes per 28 days; IBM's metered usage also includes some per-job overhead, shown as a sensitivity column |
+
+Emulation runs each program on its own region of the device's noise model. That is exact for Aer's device
+noise models, whose errors are local to the qubits each gate touches, so programs on disjoint qubits have a
+product output distribution (checked in `tests/test_packing.py`). The emulator has no crosstalk and no idle
+noise of its own: a short program packed with a long one is not charged for any waiting. Whether it waits on
+hardware, and in which state, depends on how the provider schedules the joint circuit; that is not modelled.
