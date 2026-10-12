@@ -17,12 +17,13 @@ Minor project, Department of AI & Data Science (Batch 20): Manoj Kumar P, Ayaan 
 | Calibration-aware routing | `qedge/quantum/calibration.py`, `CalibratedIBMBackend` | Reads per-qubit error rates and queue lengths for every IBM device (free, no QPU time), picks the device and physical qubits with the highest estimated success probability, feeds per-workload error figures to the cost model, detects drift, and logs live traces for the simulator. Uses calibration snapshots of 8 real IBM devices when no account is set. |
 | Job packing | `qedge/quantum/packing.py` | Runs several small circuits from different clients side by side in one QPU job on the best free qubit regions, optionally with a free-qubit ring between them, and splits the results: one queue wait, one task fee and one set of shots shared. |
 | Race mode | `Orchestrator.submit(..., race=True)`, `qedge/quantum/backends/base.py` | Runs the best classical placement next to a QPU job, delivers the QPU result only if it beats the deadline, and cancels the QPU job otherwise (real cancellation on IBM; emulators stop at the next circuit). |
+| Split hybrid neural network | `qedge/ml/`, `qedge/orchestrator/split.py` | A small CNN on the edge that compresses each image into k numbers, with a linear, MLP or k-qubit quantum classifier head (PennyLane, autograd backprop; the same weights run on every stack and in packed QPU jobs). The router chooses where to cut the network and where the head runs, and a reconstruction attack measures what each cut would reveal before anything private may leave the edge. |
 | Hybrid algorithms | `qedge/quantum/algorithms.py` | QAOA for MaxCut, quantum-kernel SVM, Trotterised spin-chain simulation, written once for every stack. |
-| Workloads | `qedge/workloads.py` | Inference, training, optimisation, kernel classification, quantum simulation, with compute, data, deadline, privacy and quantum-circuit profiles. |
+| Workloads | `qedge/workloads.py` | Inference, training, optimisation, kernel classification, quantum simulation, split inference, with compute, data, deadline, privacy and quantum-circuit profiles. |
 | Decision engine | `qedge/orchestrator/` | Cost model (latency, edge energy, total energy, money, quality), hard constraints, an explicit **quantum-benefit gate**, a weighted score, and a feedback loop that learns where reality differs from the model. |
 | Live prototype | `qedge/orchestrator/engine.py`, `qedge/executor.py` | Profile, monitor, decide, execute the real payload, evaluate, feed back. |
 | Simulation environment | `qedge/simulation/simulator.py` | Discrete-event simulator with hidden "true" conditions, 7 scenarios plus 2 future-QPU stress scenarios, optional QPU job batching and a hedged (race-mode) policy. |
-| Experiments | `qedge/experiments/` | E1 stacks, E2 quantum vs classical, E3 policies, E4 decision boundaries, E5 live runs, E6 calibration-aware routing, E7 job packing, batching and race mode. |
+| Experiments | `qedge/experiments/` | E1 stacks, E2 quantum vs classical, E3 policies, E4 decision boundaries, E5 live runs, E6 calibration-aware routing, E7 job packing, batching and race mode, E9 the split neural network. |
 | Dashboard | `dashboard/app.py` | Streamlit: plan/run a workload, see why, run simulations, explore what-if maps, browse results. |
 | Report | `REPORT.md` | Research-style write-up of the results (narrative source in `docs/narrative.md`, tables generated from `results/`). |
 
@@ -36,15 +37,18 @@ python -m qedge status                                # which stacks / devices a
 python -m qedge submit optimization n=8               # plan + run one workload, with the reasoning
 python -m qedge submit quantum_simulation n=8 steps=4 --force cloud_cpu+qpu   # force the QPU path
 python -m qedge simulate --scenario network_congested # compare 7 policies in simulation
-python -m qedge experiments --quick                   # all seven experiments, small sizes (minutes)
+python -m qedge experiments --quick                   # every experiment, small sizes (minutes)
 python -m qedge experiments                           # full run (longer), rebuilds REPORT.md
 python -m qedge pack quantum_simulation n=4 steps=2 --copies 8   # 8 circuits in one QPU job
 python -m qedge submit quantum_simulation n=8 steps=3 --force cloud_cpu+qpu --race --deadline 5   # race mode
 python -m qedge simulate --scenario quantum_heavy_future --batch-window 30 --hedge          # batching + hedging
 python -m qedge calibration show                      # error rates of every IBM device (live or snapshot)
 python -m qedge calibration pick quantum_simulation n=8 steps=3   # which device and qubits, and why
+python -m qedge split plan k=4 batch=8 privacy=true --bandwidth 5   # every way to cut the network, and the pick
+python -m qedge split profile                         # measured head accuracies and leakage per cut
+python -m qedge submit split_inference k=4 batch=16 --force "edge_gpu>embedding>qpu"   # quantum head, packed
 python -m qedge dashboard                             # opens the dashboard in your browser
-pytest                                                # 138 tests
+pytest                                                # 229 tests
 ```
 
 ## Using real quantum hardware
@@ -90,10 +94,11 @@ cannot burn a month of free minutes or a large bill. QAOA uses 8 optimiser itera
 
 ## Dashboard
 
-`python -m qedge dashboard` opens six tabs: plan and run one workload (with every placement's predicted
+`python -m qedge dashboard` opens seven tabs: plan and run one workload (with every placement's predicted
 latency, energy, cost, quality and the quantum-gate checks), run the simulation, a what-if map for QPU
 hardware figures, the experiment results, provider status, and calibration (device error rates, the device
-and qubits chosen for a workload, a map of the chosen qubits, and drift from logged traces). The orchestrator
+and qubits chosen for a workload, a map of the chosen qubits, and drift from logged traces), and the split model (head accuracies, leakage per cut, and an interactive
+router for bandwidth, edge device and privacy). The orchestrator
 tab has a race-mode switch, and the simulation tab offers QPU batching windows and the hedged policy.
 
 ![Orchestrator tab](docs/dashboard_orchestrator.png)
@@ -102,6 +107,8 @@ tab has a race-mode switch, and the simulation tab offers QPU batching windows a
 
 ![Calibration tab](docs/dashboard_calibration.png)
 
+![Split model tab](docs/dashboard_split.png)
+
 ## How a decision is made
 
 1. **Workload analysis.** Size, FLOPs, memory, input data, deadline, privacy, minimum quality, and, if it has
@@ -109,8 +116,11 @@ tab has a race-mode switch, and the simulation tab offers QPU batching windows a
 2. **Resource monitoring.** Slot queues, CPU load, ping RTT, provider-reported QPU queue.
    With `ibm-auto`, the monitor also reads each IBM device's calibration and gives the cost model the error
    figures of the best qubit region of the best device for this workload's size.
-3. **Candidate placements.** Four classical tiers, plus `host + quantum_sim` and `host + qpu` hybrids.
-4. **Hard constraints.** Memory, qubit count, privacy (private data never leaves the edge).
+3. **Candidate placements.** Four classical tiers, plus `host + quantum_sim` and `host + qpu` hybrids. For a
+   split neural network, also every cut point between an edge device and a cloud tier or quantum head
+   (`edge_gpu>conv2>cloud_gpu`, `edge_gpu>embedding>qpu`).
+4. **Hard constraints.** Memory, qubit count, privacy (private data never leaves the edge; for a split
+   network, a cut may carry private data only if the measured reconstruction attack fails on it).
 5. **Quantum-benefit gate.** A hybrid placement is only considered if it has a formulation, fits the device,
    has estimated fidelity ≥ 0.05, is predicted to be at least as good as the best classical option, and meets
    the deadline. The dashboard and CLI print every check.
@@ -131,3 +141,7 @@ tab has a race-mode switch, and the simulation tab offers QPU batching windows a
   device's own noise model. That emulation shares the calibration it is judged against, so it shows the
   routing works as designed; whether the ranking holds on live hardware (crosstalk, drift between
   calibrations) is what `python -m qedge calibration` with a token will show.
+* The split neural network is measured on one small image task (8x8 digits). There its quantum head matched
+  or trailed a classical head of the same size, and no cut passed the privacy test against the three attacks
+  tried, so the router keeps that model on the edge. The camera-sized profile uses architecture figures, not
+  a trained model.

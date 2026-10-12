@@ -173,6 +173,51 @@ def build(path: str = "REPORT.md", narrative: str = "docs/narrative.md"):
                          "thread on the same machine:\n")
             parts.append(_md(lag, ".4g"))
         parts.append("\n![](figures/e7_race.png)\n")
+    hs = _r("e9_heads_summary.csv")
+    if hs is not None:
+        parts.append("## A14. Split model: classifier heads (E9)\n")
+        parts.append("Test accuracy on the same 360 digit images, mean and std over training seeds (the data split "
+                     "is fixed). `quantum_l0` is the quantum head with no trainable layers (encoding + readout).\n")
+        t = hs.pivot_table(index=["mode", "k"], columns="head", values="test_acc_mean").reset_index()
+        parts.append(_md(t))
+        pp = _r("e9_heads_paired.csv")
+        if pp is not None:
+            parts.append("\nPaired differences per seed (positive = first head better):\n")
+            cols = ["mode", "k", "difference", "mean", "min", "max", "seeds_a_better", "seeds"]
+            parts.append(_md(pp[pp.difference.isin(["quantum - linear", "quantum - quantum_l0"])][cols]))
+        parts.append("\n![](figures/e9_heads.png)\n")
+    lk = _r("e9_leakage_summary.csv")
+    if lk is not None:
+        parts.append("## A15. Split model: what the transmitted tensor reveals (E9)\n")
+        parts.append("Strongest of ridge, MLP and kNN decoders, over 3 seeds. `reid` = share of the 360 test images "
+                     "whose reconstruction is nearest to its own original (chance 1/360, label alone "
+                     f"{lk.reid_label.iloc[0]:.3f}). The policy limit is 5 images beyond the label (an assumption). "
+                     "Against these attacks only; not a guarantee.\n")
+        cols = ["k", "cut", "reid_mean", "reid_max", "reid_beyond_label_images_max", "r2_beyond_label_max",
+                "private_ok_any_seed", "strongest_reid"]
+        parts.append(_md(lk[[c for c in cols if c in lk.columns]]))
+        parts.append("\n![](figures/e9_leakage.png)\n\n![](figures/e9_reconstructions.png)\n")
+    dv = _r("e9_device.csv")
+    if dv is not None:
+        parts.append("## A16. Split model: quantum head on devices, and the router (E9)\n")
+        parts.append("Seed-0 quantum head on all 360 test images, 1000 shots. `ibm-auto` is the calibration-chosen "
+                     "IBM device emulated from its snapshot; packed paths share one job between several images. "
+                     "Price uses the Braket-style figures in the catalogue (an assumption). `modelled_quality` is "
+                     "the cost model's prediction.\n")
+        cols = ["k", "path", "device", "accuracy", "agreement_with_exact", "jobs", "qpu_s", "price_usd",
+                "modelled_quality", "wall_s"]
+        parts.append(_md(dv[[c for c in cols if c in dv.columns]], ".4g"))
+        rs = _r("e9_router_summary.csv")
+        if rs is not None:
+            parts.append("\nRouter decisions (each row covers 60 conditions: 2 profiles x 3 edge devices x 5 uplinks x "
+                         "2 batch sizes). `qhead_equal` assumes the quantum head as accurate as the best classical "
+                         "head; `_private` also treats the embedding as private; `future` is a 100x better, 10x "
+                         "cheaper QPU. All three are what-ifs, not measurements.\n")
+            cols = ["policy", "qpu", "whatif", "privacy", "deadline", "edge only", "split to cloud",
+                    "cloud (raw input)", "quantum head (QPU)", "quantum head (simulator)", "gate_qpu_open",
+                    "most_common_qpu_gate_failure"]
+            parts.append(_md(rs[rs.policy == "qedge_static"][[c for c in cols if c in rs.columns]]))
+        parts.append("\n![](figures/e9_device.png)\n\n![](figures/e9_split_map.png)\n")
     with open(path, "w") as f:
         f.write("\n".join(parts) + "\n")
     return path

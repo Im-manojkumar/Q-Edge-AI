@@ -24,7 +24,10 @@ circuits) across 16 circuits on eight IBM device calibrations, and avoided broke
 default placement walked into. Packing several small circuits side by side into one QPU job cut QPU time and
 price per circuit 8x at eight circuits per job, for an emulated fidelity loss under 0.3% before
 crosstalk, and racing a classical fallback against the QPU delivered a result within 0.6 s of every
-deadline in the live prototype.
+deadline in the live prototype. A neural network split between the edge and a quantum classifier head
+worked end to end, but the quantum head matched or trailed a classical head of the same size, and the
+embedding sent off the edge still let an attacker re-identify about 14% of inputs at k = 8, so the router keeps
+such models on the edge.
 
 ## 1. Problem and approach
 
@@ -83,6 +86,7 @@ estimates. All modelling assumptions are in `docs/assumptions.md`.
 | E5 | Does the prototype run end to end? | Real payloads through the live orchestrator, and every quantum-capable job forced through classical, simulator and QPU-emulator paths. |
 | E6 | Does routing by calibration data pay off? | 16 TFIM, QAOA and kernel circuits (4 to 12 qubits) on eight IBM devices: v1's fixed device and default qubits vs the device and qubits chosen from per-qubit calibration, scored against the ideal output. |
 | E7 | Can the QPU's fixed costs and queue risk be managed? | Packing: up to 26 small circuits side by side in one emulated job on two devices, with and without free qubits between them and under assumed crosstalk levels. Batching and race mode: 11 policy/batching variants x 5 scenarios x 3 seeds in the simulator. Live race mode: the real orchestrator racing the QPU path against the classical fallback at deadlines either side of the QPU time. |
+| E9 | Should a neural network be split across edge, cloud and a quantum head, and is the split private? | A CNN on 8x8 digits with linear, MLP and quantum heads at k = 2 to 8 qubits, 3 seeds, transfer and end-to-end training; the quantum head on the emulated IBM device and in packed jobs; three reconstruction attacks on every cut; 2880 router decisions over devices, bandwidth, privacy, deadlines and QPU what-ifs. |
 
 ## 3. Results
 
@@ -285,6 +289,59 @@ QPU side is a network wait.
 
 ![](figures/e7_qpu_cost.png)
 
+### 3.8 A neural network split across edge, cloud and QPU (E9)
+
+The realistic way quantum touches AI today is as a small layer inside a classical model, so E9 builds one and
+lets the router decide where to cut it. A small CNN on 8x8 digit images runs on the edge and compresses each
+image into k numbers (k = 2 to 8). The head that classifies those numbers is a linear layer, a small MLP with
+about as many parameters as the quantum head, or a k-qubit variational circuit (angle encoding, two trainable
+layers, a CNOT ring, a linear readout of the k expectation values). The quantum head is trained with
+PennyLane's autograd backpropagation, and the same weights export to the framework's circuit format, so it
+runs on every stack, the calibrated IBM emulator and packed QPU jobs. Every number below is the mean over
+three training seeds on the same 360 test images. PyTorch is not used: the backbone is written in autograd.
+
+**Accuracy.** The quantum head never beat the classical heads on average.
+
+| k (qubits) | linear | MLP | quantum, 2 layers | quantum, 0 layers |
+|---|---|---|---|---|
+| 4 | 0.950 | 0.944 | 0.931 | 0.948 |
+| 8 | 0.975 | 0.963 | 0.919 | 0.969 |
+
+Paired by seed, quantum minus linear is between -0.014 (k = 3) and -0.065 (k = 7), and the quantum head was
+ahead in 1 of 21 seed-and-size pairs. The trained circuit also loses to its own zero-layer ablation (the
+encoding and readout alone) at every k from 4 to 8, so the trainable circuit adds nothing measurable here.
+Training the CNN and the quantum head jointly, so that the embedding is not shaped for a linear head, did not
+help: 0.843 (with a large spread between seeds) against 0.954 for linear at k = 4. With 1000 shots the
+quantum head matched its exact accuracy to within 0.003. On the emulated best IBM device (Aachen) it scored
+0.944 at k = 4, the same as exact; packing 16 test images per QPU job kept 0.942 and cut the modelled QPU time
+from 105 s to 6.6 s for 360 images. The cost model's quantum-head quality was pessimistic by 0.03 at k = 4
+and by 0.07 to 0.11 at k = 8, so it never favours the quantum head unfairly.
+
+**Privacy, measured instead of assumed.** "Raw data never leaves the edge, only an 8-number embedding does"
+sounds private, so we attacked it. An attacker who sees the transmitted tensor and has similar labelled
+images trains a decoder (ridge, MLP or nearest neighbours) and tries to re-identify each test image among
+all 360. The raw input and the first conv layer re-identify every image, the second conv layer 83 to 93%,
+and the k-number embedding 3.4% (k = 2) to 13.6% (k = 8). Chance is 0.28%, and knowing the predicted label
+alone gives 2.8%. Up to 52 images were re-identified beyond what the label gives, against a policy limit of
+5 (five times chance). So **no cut passes the privacy test at any k**, and the router keeps private
+workloads entirely on the edge. This is against these three attacks, not a guarantee; a stronger attack
+could only find more.
+
+**Where the router cuts.** Across 2880 router decisions (two profiles, three edge devices, uplinks from 1 to
+1000 Mbps, privacy on and off, single images and batches of 32, real-time and batch deadlines, today's and a
+future QPU, two policies), it chose edge-only 2544 times and uploading the raw image to a cloud GPU 336
+times. It never chose a split or the quantum head. For the digits model the head after the embedding is
+80 FLOPs, so nothing is worth sending. For a camera-sized model (MobileNetV2 figures, an assumption) a slow
+edge with a fast link goes to the cloud, but every intermediate activation is larger than the useful
+saving. Even when we assumed the quantum head as accurate as the best classical head on a 100x better and
+cheaper QPU, the gate opened but the edge still won on score. The value of this part of Q-Edge is that the
+split, the head and the privacy claim are now decisions made from measurements, and today they all point
+to the edge.
+
+![](figures/e9_heads.png)
+
+![](figures/e9_leakage.png)
+
 ## 4. Answer to the project question
 
 * **Run locally on the edge CPU/GPU** when the data are private, the deadline is tight relative to upload
@@ -300,6 +357,9 @@ QPU side is a network wait.
 * **Share and hedge QPU jobs.** Pack small circuits from several clients into one job (8x cheaper per
   circuit at eight per job for under 0.3% fidelity in emulation), and race a classical fallback when the
   queue might break the deadline.
+* **Treat a quantum classifier head as an experiment, not a deployment.** In E9 it matched or trailed a
+  classical head of the same size, and the k-number embedding it reads still re-identified 3 to 14% of
+  inputs, so private inference stays on the edge.
 
 That conclusion is the framework working as intended. The value of Q-Edge is that the decision is explicit,
 measured and re-evaluated as hardware improves: changing three numbers in the configuration (error rate,
@@ -324,6 +384,9 @@ queue, price) moves the boundary, and the dashboard shows it moving.
   an assumed factor. Batching and simulated race mode use the hypothetical future QPU of E3, assume packing
   costs no fidelity, and assume a job cancelled while queued is not charged. Live race timings share one
   machine between both paths.
+* E9 uses one small image task (8x8 digits) and one model family; the camera profile's FLOPs and activation
+  sizes are architecture figures, not a trained model, and its privacy verdict is inherited from digits. The
+  privacy test covers three decoders only. The quantum head was run on emulated devices, not real hardware.
 * Small test sets in the live runs (10 to 30 points) make single-run accuracies noisy; E2 is the place for
   statistical comparison.
 
@@ -331,8 +394,8 @@ queue, price) moves the boundary, and the dashboard shows it moving.
 
 ```bash
 pip install -r requirements.txt
-pytest                                   # 138 tests
-python -m qedge experiments              # all seven experiments, then REPORT.md
+pytest                                   # 229 tests
+python -m qedge experiments              # every experiment, then REPORT.md
 python -m qedge dashboard
 ```
 
@@ -340,7 +403,7 @@ python -m qedge dashboard
 
 # Appendix: generated result tables
 
-Generated from `results/` by `python -m qedge report`. Run settings: `{"quick": false, "python": "3.13.16", "machine": "x86_64", "versions": {"qiskit": "2.5.2", "qiskit_aer": "0.17.2", "pennylane": "0.45.1", "cirq": "1.7.0", "amazon-braket-sdk": "1.127.3.post0"}, "timings_s": {"e2": 1299.7, "e1": 362.7, "e3": 18.2, "e4": 0.4, "e5": 290.7, "e6": 1261.7, "e7_packing": 331.0, "e7_batching": 27.0}}`
+Generated from `results/` by `python -m qedge report`. Run settings: `{"quick": false, "python": "3.13.16", "machine": "x86_64", "versions": {"qiskit": "2.5.2", "qiskit_aer": "0.17.2", "pennylane": "0.45.1", "cirq": "1.7.0", "amazon-braket-sdk": "1.127.3.post0"}, "timings_s": {"e2": 1299.7, "e1": 362.7, "e3": 18.2, "e4": 0.4, "e5": 290.7, "e6": 1261.7, "e7_packing": 331.0, "e7_batching": 27.0, "e9": 2397.3}}`
 
 ## A1. Stack agreement and speed (E1)
 
@@ -764,4 +827,135 @@ How late a timed 50 ms wait wakes up (ms), idle vs while the emulator runs in an
 | idle | 60 | 0.1677 | 0.3827 | 0.639 |
 
 ![](figures/e7_race.png)
+
+## A14. Split model: classifier heads (E9)
+
+Test accuracy on the same 360 digit images, mean and std over training seeds (the data split is fixed). `quantum_l0` is the quantum head with no trainable layers (encoding + readout).
+
+| mode | k | linear | mlp | quantum | quantum_l0 |
+|---|---|---|---|---|---|
+| end-to-end | 4 | 0.954 | 0.890 | 0.843 | 0.941 |
+| end-to-end | 8 | 0.975 | 0.963 | 0.923 | 0.975 |
+| transfer | 2 | 0.693 | 0.647 | 0.630 | 0.636 |
+| transfer | 3 | 0.868 | 0.854 | 0.854 | 0.850 |
+| transfer | 4 | 0.950 | 0.944 | 0.931 | 0.948 |
+| transfer | 5 | 0.965 | 0.951 | 0.910 | 0.960 |
+| transfer | 6 | 0.969 | 0.959 | 0.930 | 0.968 |
+| transfer | 7 | 0.966 | 0.960 | 0.901 | 0.960 |
+| transfer | 8 | 0.975 | 0.963 | 0.919 | 0.969 |
+
+Paired differences per seed (positive = first head better):
+
+| mode | k | difference | mean | min | max | seeds_a_better | seeds |
+|---|---|---|---|---|---|---|---|
+| transfer | 2 | quantum - linear | -0.063 | -0.103 | -0.042 | 0 | 3 |
+| transfer | 2 | quantum - quantum_l0 | -0.006 | -0.014 | 0.000 | 0 | 3 |
+| transfer | 3 | quantum - linear | -0.014 | -0.033 | 0.011 | 1 | 3 |
+| transfer | 3 | quantum - quantum_l0 | 0.004 | -0.019 | 0.019 | 2 | 3 |
+| transfer | 4 | quantum - linear | -0.019 | -0.025 | -0.011 | 0 | 3 |
+| transfer | 4 | quantum - quantum_l0 | -0.017 | -0.019 | -0.014 | 0 | 3 |
+| transfer | 5 | quantum - linear | -0.055 | -0.083 | -0.028 | 0 | 3 |
+| transfer | 5 | quantum - quantum_l0 | -0.050 | -0.081 | -0.025 | 0 | 3 |
+| transfer | 6 | quantum - linear | -0.040 | -0.047 | -0.033 | 0 | 3 |
+| transfer | 6 | quantum - quantum_l0 | -0.038 | -0.042 | -0.033 | 0 | 3 |
+| transfer | 7 | quantum - linear | -0.065 | -0.075 | -0.050 | 0 | 3 |
+| transfer | 7 | quantum - quantum_l0 | -0.059 | -0.072 | -0.044 | 0 | 3 |
+| transfer | 8 | quantum - linear | -0.056 | -0.067 | -0.047 | 0 | 3 |
+| transfer | 8 | quantum - quantum_l0 | -0.050 | -0.067 | -0.042 | 0 | 3 |
+| end-to-end | 4 | quantum - linear | -0.111 | -0.236 | -0.028 | 0 | 3 |
+| end-to-end | 4 | quantum - quantum_l0 | -0.098 | -0.247 | 0.008 | 1 | 3 |
+| end-to-end | 8 | quantum - linear | -0.052 | -0.094 | -0.022 | 0 | 3 |
+| end-to-end | 8 | quantum - quantum_l0 | -0.052 | -0.097 | -0.011 | 0 | 3 |
+
+![](figures/e9_heads.png)
+
+## A15. Split model: what the transmitted tensor reveals (E9)
+
+Strongest of ridge, MLP and kNN decoders, over 3 seeds. `reid` = share of the 360 test images whose reconstruction is nearest to its own original (chance 1/360, label alone 0.028). The policy limit is 5 images beyond the label (an assumption). Against these attacks only; not a guarantee.
+
+| k | cut | reid_mean | reid_max | reid_beyond_label_images_max | r2_beyond_label_max | private_ok_any_seed | strongest_reid |
+|---|---|---|---|---|---|---|---|
+| 2 | input | 1.000 | 1.000 | 350 | 0.581 | False | ridge |
+| 2 | conv1 | 1.000 | 1.000 | 350 | 0.527 | False | ridge |
+| 2 | conv2 | 0.834 | 0.842 | 293 | 0.354 | False | mlp |
+| 2 | embedding | 0.034 | 0.039 | 13 | -0.090 | False | knn/mlp |
+| 3 | input | 1.000 | 1.000 | 350 | 0.581 | False | ridge |
+| 3 | conv1 | 1.000 | 1.000 | 350 | 0.528 | False | ridge |
+| 3 | conv2 | 0.878 | 0.906 | 316 | 0.373 | False | mlp/ridge |
+| 3 | embedding | 0.051 | 0.067 | 21 | 0.019 | False | knn |
+| 4 | input | 1.000 | 1.000 | 350 | 0.581 | False | ridge |
+| 4 | conv1 | 1.000 | 1.000 | 350 | 0.525 | False | ridge |
+| 4 | conv2 | 0.898 | 0.917 | 320 | 0.389 | False | mlp/ridge |
+| 4 | embedding | 0.083 | 0.106 | 35 | 0.058 | False | knn |
+| 5 | input | 1.000 | 1.000 | 350 | 0.581 | False | ridge |
+| 5 | conv1 | 1.000 | 1.000 | 350 | 0.533 | False | ridge |
+| 5 | conv2 | 0.881 | 0.892 | 311 | 0.374 | False | mlp/ridge |
+| 5 | embedding | 0.081 | 0.094 | 30 | 0.065 | False | knn |
+| 6 | input | 1.000 | 1.000 | 350 | 0.581 | False | ridge |
+| 6 | conv1 | 1.000 | 1.000 | 350 | 0.532 | False | ridge |
+| 6 | conv2 | 0.902 | 0.925 | 323 | 0.393 | False | mlp/ridge |
+| 6 | embedding | 0.103 | 0.131 | 44 | 0.105 | False | knn |
+| 7 | input | 1.000 | 1.000 | 350 | 0.581 | False | ridge |
+| 7 | conv1 | 1.000 | 1.000 | 350 | 0.532 | False | ridge |
+| 7 | conv2 | 0.891 | 0.925 | 323 | 0.396 | False | ridge |
+| 7 | embedding | 0.128 | 0.144 | 49 | 0.133 | False | knn |
+| 8 | input | 1.000 | 1.000 | 350 | 0.581 | False | ridge |
+| 8 | conv1 | 1.000 | 1.000 | 350 | 0.531 | False | ridge |
+| 8 | conv2 | 0.920 | 0.922 | 322 | 0.401 | False | ridge |
+| 8 | embedding | 0.136 | 0.153 | 52 | 0.126 | False | knn |
+
+![](figures/e9_leakage.png)
+
+![](figures/e9_reconstructions.png)
+
+## A16. Split model: quantum head on devices, and the router (E9)
+
+Seed-0 quantum head on all 360 test images, 1000 shots. `ibm-auto` is the calibration-chosen IBM device emulated from its snapshot; packed paths share one job between several images. Price uses the Braket-style figures in the catalogue (an assumption). `modelled_quality` is the cost model's prediction.
+
+| k | path | device | accuracy | agreement_with_exact | jobs | qpu_s | price_usd | modelled_quality | wall_s |
+|---|---|---|---|---|---|---|---|---|---|
+| 4 | exact | - | 0.9444 | 1 | - | - | - | 0.9128 | - |
+| 4 | sampled 100 shots | - | 0.9361 | 0.9833 | - | - | - | 0.9128 | - |
+| 4 | sampled 1000 shots | - | 0.9444 | 1 | - | - | - | 0.9128 | - |
+| 4 | ibm-auto (emulated) | fake_aachen | 0.9444 | 1 | 360 | 105.2 | 630 | 0.9128 | 12.59 |
+| 4 | packed 8 per job | fake_aachen | 0.9444 | 0.9972 | 45 | 13 | 78.75 | 0.9128 | 130.7 |
+| 4 | packed 16 per job | fake_aachen | 0.9417 | 0.9944 | 23 | 6.646 | 40.25 | 0.9128 | 51.21 |
+| 8 | exact | - | 0.9222 | 1 | - | - | - | 0.8521 | - |
+| 8 | sampled 100 shots | - | 0.8917 | 0.925 | - | - | - | 0.8521 | - |
+| 8 | sampled 1000 shots | - | 0.925 | 0.975 | - | - | - | 0.8521 | - |
+| 8 | ibm-auto (emulated) | fake_aachen | 0.925 | 0.9861 | 360 | 117.1 | 630 | 0.8521 | 751.2 |
+| 8 | packed 8 per job | fake_aachen | 0.9167 | 0.9722 | 60 | 18.99 | 105 | 0.8521 | 829.8 |
+
+Router decisions (each row covers 60 conditions: 2 profiles x 3 edge devices x 5 uplinks x 2 batch sizes). `qhead_equal` assumes the quantum head as accurate as the best classical head; `_private` also treats the embedding as private; `future` is a 100x better, 10x cheaper QPU. All three are what-ifs, not measurements.
+
+| policy | qpu | whatif | privacy | deadline | edge only | split to cloud | cloud (raw input) | quantum head (QPU) | quantum head (simulator) | gate_qpu_open | most_common_qpu_gate_failure |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| qedge_static | today | measured | False | real-time | 48 | 0 | 12 | 0 | 0 | 0 | expected quality gain; meets deadline |
+| qedge_static | future | measured | False | real-time | 48 | 0 | 12 | 0 | 0 | 0 | expected quality gain; meets deadline |
+| qedge_static | today | measured | False | batch job | 44 | 0 | 16 | 0 | 0 | 0 | expected quality gain |
+| qedge_static | future | measured | False | batch job | 44 | 0 | 16 | 0 | 0 | 0 | expected quality gain |
+| qedge_static | today | measured | True | real-time | 60 | 0 | 0 | 0 | 0 | 0 | data may leave edge; expected quality gain; meets deadline |
+| qedge_static | future | measured | True | real-time | 60 | 0 | 0 | 0 | 0 | 0 | data may leave edge; expected quality gain; meets deadline |
+| qedge_static | today | measured | True | batch job | 60 | 0 | 0 | 0 | 0 | 0 | data may leave edge; expected quality gain |
+| qedge_static | future | measured | True | batch job | 60 | 0 | 0 | 0 | 0 | 0 | data may leave edge; expected quality gain |
+| qedge_static | today | qhead_equal | False | real-time | 48 | 0 | 12 | 0 | 0 | 0 | expected quality gain; meets deadline |
+| qedge_static | future | qhead_equal | False | real-time | 48 | 0 | 12 | 0 | 0 | 0 | meets deadline |
+| qedge_static | today | qhead_equal | False | batch job | 44 | 0 | 16 | 0 | 0 | 0 | expected quality gain |
+| qedge_static | future | qhead_equal | False | batch job | 44 | 0 | 16 | 0 | 0 | 60 | - |
+| qedge_static | today | qhead_equal | True | real-time | 60 | 0 | 0 | 0 | 0 | 0 | data may leave edge; expected quality gain; meets deadline |
+| qedge_static | future | qhead_equal | True | real-time | 60 | 0 | 0 | 0 | 0 | 0 | data may leave edge; meets deadline |
+| qedge_static | today | qhead_equal | True | batch job | 60 | 0 | 0 | 0 | 0 | 0 | data may leave edge; expected quality gain |
+| qedge_static | future | qhead_equal | True | batch job | 60 | 0 | 0 | 0 | 0 | 0 | data may leave edge |
+| qedge_static | today | qhead_equal_private | False | real-time | 48 | 0 | 12 | 0 | 0 | 0 | expected quality gain; meets deadline |
+| qedge_static | future | qhead_equal_private | False | real-time | 48 | 0 | 12 | 0 | 0 | 0 | meets deadline |
+| qedge_static | today | qhead_equal_private | False | batch job | 44 | 0 | 16 | 0 | 0 | 0 | expected quality gain |
+| qedge_static | future | qhead_equal_private | False | batch job | 44 | 0 | 16 | 0 | 0 | 60 | - |
+| qedge_static | today | qhead_equal_private | True | real-time | 60 | 0 | 0 | 0 | 0 | 0 | expected quality gain; meets deadline |
+| qedge_static | future | qhead_equal_private | True | real-time | 60 | 0 | 0 | 0 | 0 | 0 | meets deadline |
+| qedge_static | today | qhead_equal_private | True | batch job | 60 | 0 | 0 | 0 | 0 | 0 | expected quality gain |
+| qedge_static | future | qhead_equal_private | True | batch job | 60 | 0 | 0 | 0 | 0 | 60 | - |
+
+![](figures/e9_device.png)
+
+![](figures/e9_split_map.png)
 

@@ -24,7 +24,10 @@ circuits) across 16 circuits on eight IBM device calibrations, and avoided broke
 default placement walked into. Packing several small circuits side by side into one QPU job cut QPU time and
 price per circuit 8x at eight circuits per job, for an emulated fidelity loss under 0.3% before
 crosstalk, and racing a classical fallback against the QPU delivered a result within 0.6 s of every
-deadline in the live prototype.
+deadline in the live prototype. A neural network split between the edge and a quantum classifier head
+worked end to end, but the quantum head matched or trailed a classical head of the same size, and the
+embedding sent off the edge still let an attacker re-identify about 14% of inputs at k = 8, so the router keeps
+such models on the edge.
 
 ## 1. Problem and approach
 
@@ -83,6 +86,7 @@ estimates. All modelling assumptions are in `docs/assumptions.md`.
 | E5 | Does the prototype run end to end? | Real payloads through the live orchestrator, and every quantum-capable job forced through classical, simulator and QPU-emulator paths. |
 | E6 | Does routing by calibration data pay off? | 16 TFIM, QAOA and kernel circuits (4 to 12 qubits) on eight IBM devices: v1's fixed device and default qubits vs the device and qubits chosen from per-qubit calibration, scored against the ideal output. |
 | E7 | Can the QPU's fixed costs and queue risk be managed? | Packing: up to 26 small circuits side by side in one emulated job on two devices, with and without free qubits between them and under assumed crosstalk levels. Batching and race mode: 11 policy/batching variants x 5 scenarios x 3 seeds in the simulator. Live race mode: the real orchestrator racing the QPU path against the classical fallback at deadlines either side of the QPU time. |
+| E9 | Should a neural network be split across edge, cloud and a quantum head, and is the split private? | A CNN on 8x8 digits with linear, MLP and quantum heads at k = 2 to 8 qubits, 3 seeds, transfer and end-to-end training; the quantum head on the emulated IBM device and in packed jobs; three reconstruction attacks on every cut; 2880 router decisions over devices, bandwidth, privacy, deadlines and QPU what-ifs. |
 
 ## 3. Results
 
@@ -285,6 +289,59 @@ QPU side is a network wait.
 
 ![](figures/e7_qpu_cost.png)
 
+### 3.8 A neural network split across edge, cloud and QPU (E9)
+
+The realistic way quantum touches AI today is as a small layer inside a classical model, so E9 builds one and
+lets the router decide where to cut it. A small CNN on 8x8 digit images runs on the edge and compresses each
+image into k numbers (k = 2 to 8). The head that classifies those numbers is a linear layer, a small MLP with
+about as many parameters as the quantum head, or a k-qubit variational circuit (angle encoding, two trainable
+layers, a CNOT ring, a linear readout of the k expectation values). The quantum head is trained with
+PennyLane's autograd backpropagation, and the same weights export to the framework's circuit format, so it
+runs on every stack, the calibrated IBM emulator and packed QPU jobs. Every number below is the mean over
+three training seeds on the same 360 test images. PyTorch is not used: the backbone is written in autograd.
+
+**Accuracy.** The quantum head never beat the classical heads on average.
+
+| k (qubits) | linear | MLP | quantum, 2 layers | quantum, 0 layers |
+|---|---|---|---|---|
+| 4 | 0.950 | 0.944 | 0.931 | 0.948 |
+| 8 | 0.975 | 0.963 | 0.919 | 0.969 |
+
+Paired by seed, quantum minus linear is between -0.014 (k = 3) and -0.065 (k = 7), and the quantum head was
+ahead in 1 of 21 seed-and-size pairs. The trained circuit also loses to its own zero-layer ablation (the
+encoding and readout alone) at every k from 4 to 8, so the trainable circuit adds nothing measurable here.
+Training the CNN and the quantum head jointly, so that the embedding is not shaped for a linear head, did not
+help: 0.843 (with a large spread between seeds) against 0.954 for linear at k = 4. With 1000 shots the
+quantum head matched its exact accuracy to within 0.003. On the emulated best IBM device (Aachen) it scored
+0.944 at k = 4, the same as exact; packing 16 test images per QPU job kept 0.942 and cut the modelled QPU time
+from 105 s to 6.6 s for 360 images. The cost model's quantum-head quality was pessimistic by 0.03 at k = 4
+and by 0.07 to 0.11 at k = 8, so it never favours the quantum head unfairly.
+
+**Privacy, measured instead of assumed.** "Raw data never leaves the edge, only an 8-number embedding does"
+sounds private, so we attacked it. An attacker who sees the transmitted tensor and has similar labelled
+images trains a decoder (ridge, MLP or nearest neighbours) and tries to re-identify each test image among
+all 360. The raw input and the first conv layer re-identify every image, the second conv layer 83 to 93%,
+and the k-number embedding 3.4% (k = 2) to 13.6% (k = 8). Chance is 0.28%, and knowing the predicted label
+alone gives 2.8%. Up to 52 images were re-identified beyond what the label gives, against a policy limit of
+5 (five times chance). So **no cut passes the privacy test at any k**, and the router keeps private
+workloads entirely on the edge. This is against these three attacks, not a guarantee; a stronger attack
+could only find more.
+
+**Where the router cuts.** Across 2880 router decisions (two profiles, three edge devices, uplinks from 1 to
+1000 Mbps, privacy on and off, single images and batches of 32, real-time and batch deadlines, today's and a
+future QPU, two policies), it chose edge-only 2544 times and uploading the raw image to a cloud GPU 336
+times. It never chose a split or the quantum head. For the digits model the head after the embedding is
+80 FLOPs, so nothing is worth sending. For a camera-sized model (MobileNetV2 figures, an assumption) a slow
+edge with a fast link goes to the cloud, but every intermediate activation is larger than the useful
+saving. Even when we assumed the quantum head as accurate as the best classical head on a 100x better and
+cheaper QPU, the gate opened but the edge still won on score. The value of this part of Q-Edge is that the
+split, the head and the privacy claim are now decisions made from measurements, and today they all point
+to the edge.
+
+![](figures/e9_heads.png)
+
+![](figures/e9_leakage.png)
+
 ## 4. Answer to the project question
 
 * **Run locally on the edge CPU/GPU** when the data are private, the deadline is tight relative to upload
@@ -300,6 +357,9 @@ QPU side is a network wait.
 * **Share and hedge QPU jobs.** Pack small circuits from several clients into one job (8x cheaper per
   circuit at eight per job for under 0.3% fidelity in emulation), and race a classical fallback when the
   queue might break the deadline.
+* **Treat a quantum classifier head as an experiment, not a deployment.** In E9 it matched or trailed a
+  classical head of the same size, and the k-number embedding it reads still re-identified 3 to 14% of
+  inputs, so private inference stays on the edge.
 
 That conclusion is the framework working as intended. The value of Q-Edge is that the decision is explicit,
 measured and re-evaluated as hardware improves: changing three numbers in the configuration (error rate,
@@ -324,6 +384,9 @@ queue, price) moves the boundary, and the dashboard shows it moving.
   an assumed factor. Batching and simulated race mode use the hypothetical future QPU of E3, assume packing
   costs no fidelity, and assume a job cancelled while queued is not charged. Live race timings share one
   machine between both paths.
+* E9 uses one small image task (8x8 digits) and one model family; the camera profile's FLOPs and activation
+  sizes are architecture figures, not a trained model, and its privacy verdict is inherited from digits. The
+  privacy test covers three decoders only. The quantum head was run on emulated devices, not real hardware.
 * Small test sets in the live runs (10 to 30 points) make single-run accuracies noisy; E2 is the place for
   statistical comparison.
 
@@ -331,7 +394,7 @@ queue, price) moves the boundary, and the dashboard shows it moving.
 
 ```bash
 pip install -r requirements.txt
-pytest                                   # 138 tests
-python -m qedge experiments              # all seven experiments, then REPORT.md
+pytest                                   # 229 tests
+python -m qedge experiments              # every experiment, then REPORT.md
 python -m qedge dashboard
 ```
