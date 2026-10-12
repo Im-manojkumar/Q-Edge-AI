@@ -89,10 +89,10 @@ EXTRA_SCENARIOS: dict[str, Scenario] = {s.name: s for s in [
     Scenario("future_qpu_heavy_tail", "Hypothetical future QPU with future_qpu's mean queue, but the real wait is "
              "lognormal (sigma 1.5, same mean): most jobs start sooner, about 1% wait 10x the mean or more. "
              "The provider publishes the true mean.",
-             belief_scale=SCENARIOS["future_qpu"].belief_scale, queue_dist="lognormal", queue_sigma=1.5),
+             belief_scale=dict(SCENARIOS["future_qpu"].belief_scale), queue_dist="lognormal", queue_sigma=1.5),
     Scenario("quantum_heavy_future", "Hypothetical future QPU with a workload mix weighted toward quantum simulation "
              "and optimisation and 3x the arrival rate, so enough work reaches the QPU to batch.",
-             belief_scale=SCENARIOS["future_qpu"].belief_scale, rate_per_s=0.6, mix=QUANTUM_HEAVY_MIX),
+             belief_scale=dict(SCENARIOS["future_qpu"].belief_scale), rate_per_s=0.6, mix=QUANTUM_HEAVY_MIX),
 ]}
 
 
@@ -138,8 +138,8 @@ class BatchConfig:
     max_tasks: int = 8
     spatial: bool = True             # members that fit run side by side on disjoint qubit regions
     buffer_overhead: float = 0.25    # idle qubits fencing each program off, as a fraction of its width (assumption)
-    partial_packing: bool = True     # if the whole batch does not fit, pack subsets first-fit decreasing;
-                                     # False = all members side by side or all back to back
+    partial_packing: bool = True     # if the whole batch does not fit, pack subsets first-fit decreasing
+                                     # (an extension); False = the strict rule: all side by side or all back to back
     pack_fidelity_factor: float | Callable[[int], float] = 1.0   # x fidelity when k programs share the chip
     inform_policy: bool = True       # the policy sees the expected wait for the batch to close as QPU slot wait
 
@@ -401,13 +401,35 @@ class Simulator:
                 room.append(q.max_qubits - foot[m.i])
         return groups
 
+    @staticmethod
+    def _group_round(act: list[_Member]) -> tuple[float, float]:
+        """(shots, execution time) of one round of programs running side by side.
+
+        Circuit j of every member runs inside one combined circuit, which needs the most shots
+        and the slowest per-shot time among the members that have a circuit j; a member with
+        fewer circuits drops out of the later combined circuits. Members of the same shape
+        (circuits, rounds, shots) reduce to the slowest member's time and one member's shots."""
+        if len({(m.w.quantum.n_circuits, m.rounds, m.w.quantum.shots) for m in act}) == 1:
+            m0 = act[0]
+            return m0.w.quantum.n_circuits * m0.w.quantum.shots / m0.rounds, max(m.b("q_exec") / m.rounds for m in act)
+        circ = {m.i: m.w.quantum.n_circuits / m.rounds for m in act}           # circuits per round
+        order = sorted(act, key=lambda m: -circ[m.i])
+        shots = t = s_max = tau_max = 0.0
+        for k, m in enumerate(order):
+            qp = m.w.quantum
+            s_max = max(s_max, qp.shots)
+            tau_max = max(tau_max, m.b("q_exec") / (qp.n_circuits * qp.shots))  # seconds per shot
+            step = circ[m.i] - (circ[order[k + 1].i] if k + 1 < len(order) else 0.0)
+            shots += step * s_max
+            t += step * s_max * tau_max
+        return shots, t
+
     def _plan(self, run: list[_Member], q: Resource) -> _Plan:
         """Lockstep rounds: each round is one job with the members that still have rounds left.
-        Within a group the slowest member sets the time and the largest shot count is paid
-        (shots are shared); groups, and members that are not packed, add up."""
+        Within a group the members' circuits are run in combined circuits (``_group_round``), so
+        shots are shared; groups, and members that are not packed, add up."""
         groups = self._pack(run, q)
         hop = {m.i: m.b("q_rounds") / m.rounds - q.job_overhead_s for m in run}  # host<->QPU hop per round
-        shots = {m.i: m.w.quantum.n_circuits * m.w.quantum.shots for m in run}
         n_rounds = max(m.rounds for m in run)
         t = exec_total = shots_total = 0.0
         done: dict[int, float] = {}
@@ -416,8 +438,9 @@ class Simulator:
             for g in groups:
                 act = [m for m in g if m.rounds >= r]
                 if act:
-                    exec_r += max(m.b("q_exec") / m.rounds for m in act)
-                    shots_r += max(shots[m.i] / m.rounds for m in act)
+                    s, e = self._group_round(act)
+                    exec_r += e
+                    shots_r += s
                     hop_r = max(hop_r, max(hop[m.i] for m in act))
             t += q.job_overhead_s + hop_r + exec_r
             exec_total += exec_r

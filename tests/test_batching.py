@@ -269,6 +269,22 @@ def test_programs_that_do_not_fit_run_back_to_back():
     assert two.pack_group.tolist() == [1, 1]
 
 
+def test_packed_programs_of_different_shapes_pay_circuit_aligned_shots():
+    """Kernel (310 circuits x 500 shots) next to TFIM (5 x 4000): the five combined circuits need 4000 shots
+    each and the kernel's other 305 circuits 500 each, which is more than the larger member's shots alone."""
+    k = make_workload("kernel_classification", 0, seed=0, features=4, n_train=20, deadline_s=1e5, privacy=False)
+    s = make_workload("quantum_simulation", 1, seed=1, n=20, steps=4, deadline_s=1e5)
+    k.arrival_s, s.arrival_s = 0.0, 1.0
+    q = Simulator(QUIET).true["qpu"]
+    df = run_always(QUIET, [k, s], BatchConfig(window_s=10, max_tasks=2))
+    assert df.pack_group.tolist() == [2, 2]
+    kc, ks, sc, ss = k.quantum.n_circuits, k.quantum.shots, s.quantum.n_circuits, s.quantum.shots
+    assert (kc, ss) == (310, 4000)
+    shots = sc * max(ks, ss) + (kc - sc) * ks
+    assert df.qpu_cost_usd.sum() == pytest.approx(q.cost_per_task + shots * q.cost_per_shot)
+    assert kc * ks < shots < kc * ks + sc * ss
+
+
 def test_pack_fidelity_factor_lowers_packed_quality_only():
     wl = qsim_tasks([0, 1], n=20, steps=12)
     alone = run_always(QUIET, wl)
@@ -329,6 +345,42 @@ def test_qpu_job_cancelled_in_queue_costs_nothing():
     # without the hedge the same job runs (late) and is paid in full
     plain = run_always(stuck, wl).iloc[0]
     assert not plain.deadline_met and plain.qpu_cost_usd == pytest.approx(_qpu_charge(wl[0], sim.true["qpu"]))
+
+
+class HedgeSome(AlwaysQPU):
+    """AlwaysQPU that hedges only the listed task ids (with cloud_gpu) and records its feedback."""
+
+    def __init__(self, resources, seed=0, hedge_ids=()):
+        super().__init__(resources, seed, hedge_with="cloud_gpu")
+        self.hedge_ids, self.outcomes = set(hedge_ids), []
+
+    def decide(self, w, st):
+        d = super().decide(w, st)
+        if w.id not in self.hedge_ids:
+            d.hedge = d.hedge_estimate = None
+        return d
+
+    def observe(self, decision, outcome):
+        self.outcomes.append((decision.workload.id, decision.placement.quantum, outcome))
+
+
+def test_hedged_member_withdrawn_from_a_queued_batch_pays_nothing_and_others_share_without_it():
+    queued = dataclasses.replace(QUIET, name="queue_200", queue_trace=[200.0])   # every job waits 200 s
+    wl = qsim_tasks([0, 1, 2], n=30)
+    wl[0].deadline_s, wl[2].deadline_s = 100, 250      # task 0 expires while queued, task 2 does not
+    sim = Simulator(queued, batching=BatchConfig(window_s=10, max_tasks=3))
+    pol = HedgeSome(copy.deepcopy(sim.nominal), hedge_ids=(0, 2))
+    df = sim.run(pol, wl)
+    q = sim.true["qpu"]
+    assert df.qpu_cancelled.tolist() == [True, False, False]
+    assert df.winner.tolist() == ["classical", "", "quantum"] and df.deadline_met.all()
+    assert df.qpu_cost_usd.iloc[0] == 0.0 and df.pack_group.tolist() == [0, 2, 2]
+    # the two remaining 30-qubit programs share one fee and one set of shots
+    shots = wl[1].quantum.n_circuits * wl[1].quantum.shots
+    assert df.qpu_cost_usd.iloc[1:].sum() == pytest.approx(q.cost_per_task + shots * q.cost_per_shot)
+    qpu_feedback = {i: o for i, res, o in pol.outcomes if res == "qpu"}
+    assert qpu_feedback[0]["qpu_queue_censored"] and qpu_feedback[0]["latency_s"] == 100
+    assert not qpu_feedback[2]["qpu_queue_censored"] and qpu_feedback[2]["qpu_queue_s"] == 200
 
 
 def test_qpu_job_that_started_before_the_deadline_is_paid_even_if_late():
