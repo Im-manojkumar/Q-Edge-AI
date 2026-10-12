@@ -5,7 +5,7 @@ k-qubit quantum head on the k-number embedding (``qedge.ml``, ``orchestrator/
 split.py``). Round 1 measured one seed; this experiment measures what the
 router's profile and the report need, over seeds, and checks the cost model:
 
-(a) Heads. Seeds 0, 1, 2; k in 2, 3, 4, 5, 6, 8. Transfer mode (backbone + linear
+(a) Heads. Seeds 0, 1, 2; k in 2-8 (every k the router's profile offers). Transfer mode (backbone + linear
     head trained end to end, frozen, then every head on its embedding): linear,
     parameter-matched MLP, quantum (L=2) and quantum_l0 (the L=0 ablation). End-to-end
     mode (backbone and head trained jointly from scratch) at k = 4 and 8 for every head,
@@ -29,15 +29,38 @@ router's profile and the report need, over seeds, and checks the cost model:
     one (the capacity bounds both, so the jobs would be the same); the row says so.
 (d) Profile. ``results/split_profile.json`` from (a) and (b): accuracies are the mean
     over seeds, leakage the worst case over seeds (and, for the shared cuts, over k).
-    A ``--quick`` run writes ``split_profile.quick.json`` instead, so it never replaces
-    a full-run profile.
+    Every k in ``split.K_RANGE`` is measured, so the loaded profile never mixes measured
+    entries with the built-in placeholders; a profile that does not cover a k (a quick run)
+    lists it under ``k_not_measured``.
 (e) Router. With that profile loaded, the decisions of ``qedge_static`` and
     ``qedge_adaptive`` over: profile digits / camera; edge device; uplink 1-1000 Mbps;
     privacy off / on; batch 1 / 32; deadline 0.5 s (real time) / 3600 s (batch job);
     today's QPU (calibration snapshots) / a future QPU; measured head accuracies / what-ifs.
     Each row also scores the best quantum-head option as if its gate were open
     (``qpu_head_score``, ``sim_head_score`` against ``chosen_score``; lower is better), to
-    show how far it is from being picked.
+    show how far it is from being picked, and likewise the best split placement the router
+    may use (``best_split``, ``best_split_score``) and the best one had nothing ruled it out
+    (``best_split_any*``, with the reason it was ruled out).
+
+    No split is chosen anywhere in this grid, and that follows from the profiles; it is not
+    a finding about splitting. With privacy off, in the camera profile the stem and
+    last_conv activations are larger than the 0.15 MB compressed input (1.6 MB and 0.25 MB),
+    so they upload more than sending the raw input to the cloud; and every cut after the
+    stem (last_conv, pool, embedding) leaves at most 73 kFLOP of the model's 598 MFLOP to
+    the back (k=4), so the edge still runs the whole model and pays an upload on top, which
+    loses to edge-only. The digits model is about 47 kFLOP per image and stays on the edge.
+    The best usable split still comes close in places (stem split against cloud_gpu, edge
+    CPU, 1000 Mbps, batch 1: score 0.503 against 0.502). With privacy on, only the
+    embedding could leave the edge, and only under the ``qhead_equal_private`` what-if; the
+    stem split would beat the edge-only choice in 204 of the 2880 rows (camera, sensor or
+    edge CPU; ``best_split_any_score``) but is ruled out because no attack was run on the
+    camera's stem, so it counts as not private. So the zero says nothing about
+    whether splitting pays for a model with a small early activation; ``tests/test_e8.py``
+    gives the router such a cut (a what-if, not a measured model) and it is chosen.
+
+Quick runs (``--quick``) write every E8 output with a ``.quick`` suffix
+(``results/e8_*.quick.csv``, ``split_profile.quick.json``, ``figures/e8_*.quick.png``;
+gitignored), so they never overwrite or mix with the full run's results.
 
 Choices and assumptions (labelled; the module docstrings of ``qedge.ml`` hold the rest):
 
@@ -58,6 +81,11 @@ Choices and assumptions (labelled; the module docstrings of ``qedge.ml`` hold th
   ``AerSimulator.from_backend`` without a seed), so that row moves with shot noise from run
   to run: two full runs gave 0.944 and 0.944 at k=4, 0.919 and 0.925 at k=8. Training,
   leakage, sampled shots and the packed runs (seed 17) repeated exactly in those two runs.
+* Provenance of the committed results: k=7 was added after the first full run, and parts
+  (a), (b), (d) and (e) were run again with it. Every row for the other k came out
+  identical apart from the training times, which are from the second run. Part (c)
+  (``e8_device.csv``) is from the first run: it uses only the seed-0 heads at k = 4 and 8,
+  whose head, shot and leakage rows the second run reproduced exactly.
 * Modelled device quality: ``modelled_quality`` uses the cost model's fidelity (the head
   circuit after ``split.ROUTING_2Q``, best region of the best snapshot device);
   ``modelled_quality_esp`` uses the ESP of the layouts the device paths actually ran. Both
@@ -91,7 +119,7 @@ import numpy as np
 import pandas as pd
 
 SEEDS = (0, 1, 2)
-KS = (2, 3, 4, 5, 6, 8)
+KS = (2, 3, 4, 5, 6, 7, 8)       # = split.K_RANGE (tests/test_e8.py checks)
 E2E_KS = (4, 8)
 HEADS = ("linear", "mlp", "quantum", "quantum_l0")
 SHOTS = (100, 1000)
@@ -102,6 +130,7 @@ DATA_SEED = 0
 RECON_K, RECON_SEED = 4, 0
 RECON_CLASSES = (0, 2, 3, 5, 7, 8)      # first test image of each, for the reconstruction figure
 CUTS = ("input", "conv1", "conv2", "embedding")
+QUICK_SUFFIX = ".quick"
 QUICK = {"seeds": (0,), "ks": (2, 4), "e2e_ks": (4,), "e2e_heads": ("linear", "quantum"), "device_ks": (4,),
          "device_n": 48, "per_job": (8,), "fit": {"epochs": 12, "patience": 5}}
 
@@ -361,6 +390,9 @@ def build_profile(per_seed: dict[int, dict]) -> dict:
         e["seeds"] = seeds
     prof["seeds"] = seeds
     prof["data_split_seed"] = DATA_SEED
+    # k values the router offers that this profile does not cover: they keep the built-in
+    # placeholder entries when loaded (said here as well as in each entry's "source").
+    prof["k_not_measured"] = [k for k in split.K_RANGE if str(k) not in prof["embedding"]]
     problems = split.check_profile(prof)
     if problems:
         raise ValueError("measured profile fails the schema: " + "; ".join(problems))
@@ -550,6 +582,11 @@ def router_sweep(grid: dict | None = None, policies=ROUTER_POLICIES, k: int = RO
                     qhead = {q: min((e for e in d.estimates if e.placement.quantum == q),
                                     key=lambda e: pol.score(w, e), default=None) for q in ("qpu", "quantum_sim")}
                     qbest = qhead["qpu"]
+                    # Likewise the best split placement (edge front, cut, cloud back): the best one
+                    # the router may use, and the best one if nothing ruled it out (privacy, memory).
+                    splits = [e for e in d.estimates if e.placement.split is not None and e.placement.quantum is None]
+                    sbest = min((e for e in splits if e.feasible), key=lambda e: pol.score(w, e), default=None)
+                    sany = min(splits, key=lambda e: pol.score(w, e), default=None)
                     row = {"profile": profile, "edge": edge, "uplink_mbps": uplink, "privacy": privacy,
                            "batch": batch, "deadline": dl, "deadline_s": DEADLINES[dl], "qpu": qpu, "whatif": whatif,
                            "whatif_note": WHATIF_NOTE[whatif], "k": k, "policy": pol_name,
@@ -565,7 +602,12 @@ def router_sweep(grid: dict | None = None, policies=ROUTER_POLICIES, k: int = RO
                            "qpu_head_latency_s": qbest.latency_s if qbest else float("nan"),
                            "qpu_head_quality": qbest.quality if qbest else float("nan"),
                            "qpu_head_fidelity": qbest.fidelity if qbest else float("nan"),
-                           "qpu_device": qbest.qpu_device if qbest else ""}
+                           "qpu_device": qbest.qpu_device if qbest else "",
+                           "best_split": sbest.placement.label if sbest else "",
+                           "best_split_score": pol.score(w, sbest) if sbest else float("nan"),
+                           "best_split_any": sany.placement.label if sany else "",
+                           "best_split_any_score": pol.score(w, sany) if sany else float("nan"),
+                           "best_split_any_ruled_out": "; ".join(sany.reasons) if sany and not sany.feasible else ""}
                     for q, tag in (("qpu", "qpu"), ("quantum_sim", "sim")):
                         checks = d.quantum_checks.get(q, [])
                         failed = [(n, why) for n, ok, why in checks if not ok]
@@ -590,6 +632,12 @@ def summarise_router(df: pd.DataFrame) -> pd.DataFrame:
         r["gate_qpu_open"] = int((g.gate_qpu == "open").sum())
         r["gate_sim_open"] = int((g.gate_sim == "open").sum())
         r["meets_deadline"] = int(g.meets_deadline.sum())
+        if "best_split_score" in g:
+            # Smallest score gap of the best usable split to the choice (NaN: no split usable),
+            # and of the best split had nothing ruled it out (negative: it would have won).
+            r["splits_usable"] = int(g.best_split_score.notna().sum())
+            r["best_split_gap_min"] = float((g.best_split_score - g.chosen_score).min())
+            r["best_split_any_gap_min"] = float((g.best_split_any_score - g.chosen_score).min())
         r["most_common_qpu_gate_failure"] = (g.loc[g.gate_qpu_failed != "", "gate_qpu_failed"].mode().iloc[0]
                                              if (g.gate_qpu_failed != "").any() else "")
         out.append(r)
@@ -597,9 +645,14 @@ def summarise_router(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---- run --------------------------------------------------------------------------------
+def result_name(name: str, quick: bool) -> str:
+    """File stem of an E8 output: quick runs get ``.quick`` so they never replace the full run's."""
+    return name + (QUICK_SUFFIX if quick else "")
+
+
 def profile_path(out_dir: str, quick: bool) -> str:
     """Where this run writes its profile: a quick run never replaces the full-run profile."""
-    return os.path.join(out_dir, "split_profile.quick.json" if quick else "split_profile.json")
+    return os.path.join(out_dir, result_name("split_profile", quick) + ".json")
 
 
 def run(quick: bool = False, out_dir: str = "results", workers: int | None = None) -> dict[str, pd.DataFrame]:
@@ -643,11 +696,13 @@ def run(quick: bool = False, out_dir: str = "results", workers: int | None = Non
         split.PROFILES.clear()
         split.PROFILES.update(saved)
     print(f"[e8] done in {time.perf_counter() - t0:.0f}s", flush=True)
-    return {"e8_heads": heads, "e8_heads_summary": summarise_heads(heads), "e8_heads_paired": paired_differences(heads),
-            "e8_shots": pd.DataFrame([r for o in tr for r in o["shots"]]),
-            "e8_leakage": leak, "e8_leakage_summary": summarise_leakage(leak),
-            "e8_reconstructions": pd.DataFrame(next(o["recon"] for s, o in zip(seeds, tr) if s == RECON_SEED)),
-            "e8_device": device, "e8_router": router, "e8_router_summary": summarise_router(router)}
+    frames = {"e8_heads": heads, "e8_heads_summary": summarise_heads(heads),
+              "e8_heads_paired": paired_differences(heads), "e8_shots": pd.DataFrame([r for o in tr for r in o["shots"]]),
+              "e8_leakage": leak, "e8_leakage_summary": summarise_leakage(leak),
+              "e8_reconstructions": pd.DataFrame(next(o["recon"] for s, o in zip(seeds, tr) if s == RECON_SEED)),
+              "e8_device": device, "e8_router": router, "e8_router_summary": summarise_router(router)}
+    # Quick results are saved as e8_*.quick.csv: never over the full run's CSVs.
+    return {result_name(n, quick): df for n, df in frames.items()}
 
 
 # ---- figures ----------------------------------------------------------------------------
@@ -675,7 +730,7 @@ def heads_figure(summ: pd.DataFrame, paired: pd.DataFrame, out: str):
         ax.set_xticks(sorted(d.k.unique()))
         ax.set_xlabel("embedding size k (= qubits)")
         ax.set_title(title)
-        if mode == "end-to-end":
+        if mode == "end-to-end" and not d.empty:
             ax.set_xlim(min(d.k) - 1.5, max(d.k) + 1.5)
     lo = min(0.5, summ.test_acc_mean.min() - 0.05)
     for ax in axes[:2]:
@@ -876,19 +931,25 @@ def device_figure(dev: pd.DataFrame, out: str):
     for i, k in enumerate(ks):
         g = dev[dev.k == k].set_index("path").reindex(paths)
         xs = x + (i - (len(ks) - 1) / 2) * wdt
-        ax.bar(xs, g.accuracy, wdt * 0.9, color=kcol[i % 3], label=f"k={k} measured")
+        # Points, not bars: the axis is zoomed to the accuracy range, where bar lengths would
+        # exaggerate differences of a few points. Dotted line: the exact accuracy for this k.
+        ax.axhline(g.accuracy.get("exact", np.nan), color=kcol[i % 3], ls=":", lw=0.9)
+        ax.plot(xs, g.accuracy, "o", ms=6, color=kcol[i % 3], label=f"k={k} measured", zorder=4)
         m = g.modelled_quality.where(g.qpu_s.notna())
         ax.scatter(xs, m, marker="_", s=180, color=F.INK, zorder=3, label="cost model (region figures)" if i == 0 else None)
         if "modelled_quality_esp" in g:
             ax.scatter(xs, g.modelled_quality_esp, marker="x", s=22, color=F.MAGENTA, zorder=3,
                        label="cost model with circuit ESP" if i == 0 else None)
-    lo = max(0.0, min(dev.accuracy.min(), dev.modelled_quality.min()) - 0.1)
+    ax.plot([], [], ":", color=F.MUTED, lw=0.9, label="exact accuracy (per k)")
+    model_cols = [c for c in ("modelled_quality", "modelled_quality_esp") if c in dev]
+    lo = max(0.0, min(dev.accuracy.min(), *(dev[c].min() for c in model_cols)) - 0.03)
     ax.set_ylim(lo, 1.0)
+    ax.set_xlim(-0.6, len(paths) - 0.4)
     ax.set_xticks(x, [p.replace(" (emulated)", "\n(emulated)").replace(" per job", "\nper job")
                       .replace("sampled ", "sampled\n") for p in paths], fontsize=8)
     ax.set_ylabel(f"test accuracy ({int(dev.n_samples.iloc[0])} images)")
     ax.set_title("Quantum head (seed 0): exact, sampled, emulated device, packed")
-    ax.legend(fontsize=7, loc="upper center", ncol=4, bbox_to_anchor=(0.5, -0.17))
+    ax.legend(fontsize=7, loc="upper center", ncol=3, bbox_to_anchor=(0.5, -0.17))
     ax = axes[1]
     q = dev[dev.qpu_s.notna()]
     qp = [p for p in paths if p in set(q.path)]
@@ -918,21 +979,22 @@ def device_figure(dev: pd.DataFrame, out: str):
     F._save(fig, out)
 
 
-def make_figures(res_dir: str = "results", fig_dir: str = "figures"):
-    p = lambda name: os.path.join(res_dir, f"{name}.csv")          # noqa: E731
+def make_figures(res_dir: str = "results", fig_dir: str = "figures", quick: bool = False):
+    """Figures from the full run's CSVs, or (``quick``) from the quick run's, as e8_*.quick.png."""
+    p = lambda name: os.path.join(res_dir, result_name(name, quick) + ".csv")          # noqa: E731
+    png = lambda name: os.path.join(fig_dir, result_name(name, quick) + ".png")       # noqa: E731
     if not os.path.exists(p("e8_heads_summary")):
         return
     os.makedirs(fig_dir, exist_ok=True)
-    heads_figure(pd.read_csv(p("e8_heads_summary")), pd.read_csv(p("e8_heads_paired")),
-                 os.path.join(fig_dir, "e8_heads.png"))
+    heads_figure(pd.read_csv(p("e8_heads_summary")), pd.read_csv(p("e8_heads_paired")), png("e8_heads"))
     if os.path.exists(p("e8_leakage_summary")):
-        leakage_figure(pd.read_csv(p("e8_leakage_summary")), os.path.join(fig_dir, "e8_leakage.png"))
+        leakage_figure(pd.read_csv(p("e8_leakage_summary")), png("e8_leakage"))
     if os.path.exists(p("e8_reconstructions")):
-        reconstructions_figure(pd.read_csv(p("e8_reconstructions")), os.path.join(fig_dir, "e8_reconstructions.png"))
+        reconstructions_figure(pd.read_csv(p("e8_reconstructions")), png("e8_reconstructions"))
     if os.path.exists(p("e8_router")):
-        split_map_figure(pd.read_csv(p("e8_router")), os.path.join(fig_dir, "e8_split_map.png"))
+        split_map_figure(pd.read_csv(p("e8_router")), png("e8_split_map"))
     if os.path.exists(p("e8_device")):
-        device_figure(pd.read_csv(p("e8_device")), os.path.join(fig_dir, "e8_device.png"))
+        device_figure(pd.read_csv(p("e8_device")), png("e8_device"))
 
 
 if __name__ == "__main__":
@@ -941,6 +1003,6 @@ if __name__ == "__main__":
     ap.add_argument("--quick", action="store_true")
     a = ap.parse_args()
     os.makedirs("results", exist_ok=True)
-    for name, frame in run(a.quick).items():
+    for name, frame in run(a.quick).items():         # quick: e8_*.quick.csv (see result_name)
         frame.to_csv(os.path.join("results", f"{name}.csv"), index=False)
-    make_figures()
+    make_figures(quick=a.quick)

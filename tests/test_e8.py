@@ -83,6 +83,14 @@ def test_profile_takes_mean_accuracy_and_worst_case_leakage():
     assert prof["seeds"] == [0, 1] and "worst case over seeds" in prof["source"]
     only0 = E.build_profile({0: per_seed[0]})
     assert only0["embedding"]["4"]["private_ok"]
+    # Only k=4 measured: the other k the router offers are listed as not measured.
+    assert prof["k_not_measured"] == [k for k in split.K_RANGE if k != 4]
+
+
+def test_full_run_measures_every_k_the_router_offers():
+    # Otherwise the loaded profile would mix measured entries with built-in placeholders.
+    assert set(E.KS) == set(split.K_RANGE)
+    assert set(E.DEVICE_KS) <= set(E.KS) and set(E.E2E_KS) <= set(E.KS) and E.RECON_K in E.KS
 
 
 def test_leakage_summary_is_worst_over_seeds():
@@ -99,6 +107,21 @@ def test_leakage_summary_is_worst_over_seeds():
 def test_quick_run_never_writes_the_full_profile():
     assert E.profile_path("results", quick=False).endswith("split_profile.json")
     assert E.profile_path("results", quick=True).endswith("split_profile.quick.json")
+    assert E.result_name("e8_router", quick=False) == "e8_router"
+    assert E.result_name("e8_router", quick=True) == "e8_router.quick"
+
+
+def test_quick_figures_read_and_write_only_quick_files(tmp_path):
+    res, figs = tmp_path / "results", tmp_path / "figures"
+    res.mkdir()
+    summ = E.summarise_heads(head_rows())
+    paired = E.paired_differences(head_rows())
+    summ.to_csv(res / "e8_heads_summary.quick.csv", index=False)
+    paired.to_csv(res / "e8_heads_paired.quick.csv", index=False)
+    E.make_figures(str(res), str(figs))                     # full run: no full CSVs, nothing drawn
+    assert not figs.exists() or not any(figs.iterdir())
+    E.make_figures(str(res), str(figs), quick=True)
+    assert sorted(p.name for p in figs.iterdir()) == ["e8_heads.quick.png"]
 
 
 def test_router_catalogue_conditions():
@@ -130,3 +153,22 @@ def test_router_sweep_on_a_tiny_grid(default_profiles):
     assert not eq.gate_sim_failed.str.contains("expected quality gain").any()
     s = E.summarise_router(df)
     assert s.conditions.sum() == len(df)
+
+
+def test_router_picks_a_split_when_a_cut_pays(default_profiles):
+    """The zero splits in the E8 sweep comes from the profiles (camera cuts are either larger
+    than the input or leave almost no work to offload). Give the camera stem an activation
+    30x smaller than the input (a what-if, not a measured model) and a slow edge on a slow
+    uplink splits there."""
+    grid = {"profile": ("camera",), "edge": ("sensor",), "uplink": (1,), "privacy": (False,), "batch": (32,),
+            "deadline": ("batch job",), "qpu": ("today",), "whatif": ("measured",)}
+    devs = [C.snapshot("FakeTorino")]
+    base = E.router_sweep(grid, devices=devs)
+    assert set(base.category) == {"cloud (raw input)"}
+    assert (base.best_split_score > base.chosen_score).all() and (base.best_split_any_ruled_out == "").all()
+    stem = next(c for c in split.PROFILES["camera"]["cuts"] if c["name"] == "stem")
+    assert stem["bytes"] > split.PROFILES["camera"]["input_bytes"]
+    stem["bytes"] = split.PROFILES["camera"]["input_bytes"] // 30
+    df = E.router_sweep(grid, devices=devs)
+    assert set(df.category) == {"split to cloud"} and set(df.cut) == {"stem"}
+    assert (df.chosen_score == df.best_split_score).all()

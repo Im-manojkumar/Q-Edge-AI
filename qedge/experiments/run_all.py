@@ -56,8 +56,11 @@ def main(quick: bool = False, only: list[str] | None = None, out_dir: str = "res
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     figures.make_all(out_dir, fig_dir)
-    for mod in (e7_packing, e7_batching, e7_race, e8_split):
+    for mod in (e7_packing, e7_batching, e7_race):
         mod.make_figures(out_dir, fig_dir)
+    # E8's quick results carry a .quick suffix (they never replace the full run's), and so do
+    # their figures.
+    e8_split.make_figures(out_dir, fig_dir, quick=quick)
 
 
 if __name__ == "__main__":

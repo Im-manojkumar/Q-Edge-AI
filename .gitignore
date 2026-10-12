@@ -5,3 +5,5 @@ __pycache__/
 venv/
 .venv/
 results/split_profile.quick.json
+results/*.quick.csv
+figures/*.quick.png

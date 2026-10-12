@@ -1,49 +1,49 @@
-policy,qpu,whatif,privacy,deadline,conditions,edge only,split to cloud,cloud (raw input),quantum head (QPU),quantum head (simulator),gate_qpu_open,gate_sim_open,meets_deadline,most_common_qpu_gate_failure
-qedge_static,today,measured,False,real-time,60,48,0,12,0,0,0,0,53,expected quality gain; meets deadline
-qedge_adaptive,today,measured,False,real-time,60,48,0,12,0,0,0,0,53,expected quality gain; meets deadline
-qedge_static,future,measured,False,real-time,60,48,0,12,0,0,0,0,53,expected quality gain; meets deadline
-qedge_adaptive,future,measured,False,real-time,60,48,0,12,0,0,0,0,53,expected quality gain; meets deadline
-qedge_static,today,measured,False,batch job,60,44,0,16,0,0,0,0,60,expected quality gain
-qedge_adaptive,today,measured,False,batch job,60,44,0,16,0,0,0,0,60,expected quality gain
-qedge_static,future,measured,False,batch job,60,44,0,16,0,0,0,0,60,expected quality gain
-qedge_adaptive,future,measured,False,batch job,60,44,0,16,0,0,0,0,60,expected quality gain
-qedge_static,today,measured,True,real-time,60,60,0,0,0,0,0,0,45,data may leave edge; expected quality gain; meets deadline
-qedge_adaptive,today,measured,True,real-time,60,60,0,0,0,0,0,0,45,data may leave edge; expected quality gain; meets deadline
-qedge_static,future,measured,True,real-time,60,60,0,0,0,0,0,0,45,data may leave edge; expected quality gain; meets deadline
-qedge_adaptive,future,measured,True,real-time,60,60,0,0,0,0,0,0,45,data may leave edge; expected quality gain; meets deadline
-qedge_static,today,measured,True,batch job,60,60,0,0,0,0,0,0,60,data may leave edge; expected quality gain
-qedge_adaptive,today,measured,True,batch job,60,60,0,0,0,0,0,0,60,data may leave edge; expected quality gain
-qedge_static,future,measured,True,batch job,60,60,0,0,0,0,0,0,60,data may leave edge; expected quality gain
-qedge_adaptive,future,measured,True,batch job,60,60,0,0,0,0,0,0,60,data may leave edge; expected quality gain
-qedge_static,today,qhead_equal,False,real-time,60,48,0,12,0,0,0,0,53,expected quality gain; meets deadline
-qedge_adaptive,today,qhead_equal,False,real-time,60,48,0,12,0,0,0,0,53,expected quality gain; meets deadline
-qedge_static,future,qhead_equal,False,real-time,60,48,0,12,0,0,0,0,53,meets deadline
-qedge_adaptive,future,qhead_equal,False,real-time,60,48,0,12,0,0,0,0,53,meets deadline
-qedge_static,today,qhead_equal,False,batch job,60,44,0,16,0,0,0,60,60,expected quality gain
-qedge_adaptive,today,qhead_equal,False,batch job,60,44,0,16,0,0,0,60,60,expected quality gain
-qedge_static,future,qhead_equal,False,batch job,60,44,0,16,0,0,60,60,60,
-qedge_adaptive,future,qhead_equal,False,batch job,60,44,0,16,0,0,60,60,60,
-qedge_static,today,qhead_equal,True,real-time,60,60,0,0,0,0,0,0,45,data may leave edge; expected quality gain; meets deadline
-qedge_adaptive,today,qhead_equal,True,real-time,60,60,0,0,0,0,0,0,45,data may leave edge; expected quality gain; meets deadline
-qedge_static,future,qhead_equal,True,real-time,60,60,0,0,0,0,0,0,45,data may leave edge; meets deadline
-qedge_adaptive,future,qhead_equal,True,real-time,60,60,0,0,0,0,0,0,45,data may leave edge; meets deadline
-qedge_static,today,qhead_equal,True,batch job,60,60,0,0,0,0,0,0,60,data may leave edge; expected quality gain
-qedge_adaptive,today,qhead_equal,True,batch job,60,60,0,0,0,0,0,0,60,data may leave edge; expected quality gain
-qedge_static,future,qhead_equal,True,batch job,60,60,0,0,0,0,0,0,60,data may leave edge
-qedge_adaptive,future,qhead_equal,True,batch job,60,60,0,0,0,0,0,0,60,data may leave edge
-qedge_static,today,qhead_equal_private,False,real-time,60,48,0,12,0,0,0,0,53,expected quality gain; meets deadline
-qedge_adaptive,today,qhead_equal_private,False,real-time,60,48,0,12,0,0,0,0,53,expected quality gain; meets deadline
-qedge_static,future,qhead_equal_private,False,real-time,60,48,0,12,0,0,0,0,53,meets deadline
-qedge_adaptive,future,qhead_equal_private,False,real-time,60,48,0,12,0,0,0,0,53,meets deadline
-qedge_static,today,qhead_equal_private,False,batch job,60,44,0,16,0,0,0,60,60,expected quality gain
-qedge_adaptive,today,qhead_equal_private,False,batch job,60,44,0,16,0,0,0,60,60,expected quality gain
-qedge_static,future,qhead_equal_private,False,batch job,60,44,0,16,0,0,60,60,60,
-qedge_adaptive,future,qhead_equal_private,False,batch job,60,44,0,16,0,0,60,60,60,
-qedge_static,today,qhead_equal_private,True,real-time,60,60,0,0,0,0,0,0,45,expected quality gain; meets deadline
-qedge_adaptive,today,qhead_equal_private,True,real-time,60,60,0,0,0,0,0,0,45,expected quality gain; meets deadline
-qedge_static,future,qhead_equal_private,True,real-time,60,60,0,0,0,0,0,0,45,meets deadline
-qedge_adaptive,future,qhead_equal_private,True,real-time,60,60,0,0,0,0,0,0,45,meets deadline
-qedge_static,today,qhead_equal_private,True,batch job,60,60,0,0,0,0,0,60,60,expected quality gain
-qedge_adaptive,today,qhead_equal_private,True,batch job,60,60,0,0,0,0,0,60,60,expected quality gain
-qedge_static,future,qhead_equal_private,True,batch job,60,60,0,0,0,0,60,60,60,
-qedge_adaptive,future,qhead_equal_private,True,batch job,60,60,0,0,0,0,60,60,60,
+policy,qpu,whatif,privacy,deadline,conditions,edge only,split to cloud,cloud (raw input),quantum head (QPU),quantum head (simulator),gate_qpu_open,gate_sim_open,meets_deadline,splits_usable,best_split_gap_min,best_split_any_gap_min,most_common_qpu_gate_failure
+qedge_static,today,measured,False,real-time,60,48,0,12,0,0,0,0,53,60,0.05875032654805168,0.05875032654805168,expected quality gain; meets deadline
+qedge_adaptive,today,measured,False,real-time,60,48,0,12,0,0,0,0,53,60,0.05875032654805168,0.05875032654805168,expected quality gain; meets deadline
+qedge_static,future,measured,False,real-time,60,48,0,12,0,0,0,0,53,60,0.05875032654805168,0.05875032654805168,expected quality gain; meets deadline
+qedge_adaptive,future,measured,False,real-time,60,48,0,12,0,0,0,0,53,60,0.05875032654805168,0.05875032654805168,expected quality gain; meets deadline
+qedge_static,today,measured,False,batch job,60,44,0,16,0,0,0,0,60,60,0.000858384720344163,0.000858384720344163,expected quality gain
+qedge_adaptive,today,measured,False,batch job,60,44,0,16,0,0,0,0,60,60,0.000858384720344163,0.000858384720344163,expected quality gain
+qedge_static,future,measured,False,batch job,60,44,0,16,0,0,0,0,60,60,0.000858384720344163,0.000858384720344163,expected quality gain
+qedge_adaptive,future,measured,False,batch job,60,44,0,16,0,0,0,0,60,60,0.000858384720344163,0.000858384720344163,expected quality gain
+qedge_static,today,measured,True,real-time,60,60,0,0,0,0,0,0,45,0,,-79.4094492144134,data may leave edge; expected quality gain; meets deadline
+qedge_adaptive,today,measured,True,real-time,60,60,0,0,0,0,0,0,45,0,,-79.4094492144134,data may leave edge; expected quality gain; meets deadline
+qedge_static,future,measured,True,real-time,60,60,0,0,0,0,0,0,45,0,,-79.4094492144134,data may leave edge; expected quality gain; meets deadline
+qedge_adaptive,future,measured,True,real-time,60,60,0,0,0,0,0,0,45,0,,-79.4094492144134,data may leave edge; expected quality gain; meets deadline
+qedge_static,today,measured,True,batch job,60,60,0,0,0,0,0,0,60,0,,-6.617783063110133,data may leave edge; expected quality gain
+qedge_adaptive,today,measured,True,batch job,60,60,0,0,0,0,0,0,60,0,,-6.617783063110133,data may leave edge; expected quality gain
+qedge_static,future,measured,True,batch job,60,60,0,0,0,0,0,0,60,0,,-6.617783063110133,data may leave edge; expected quality gain
+qedge_adaptive,future,measured,True,batch job,60,60,0,0,0,0,0,0,60,0,,-6.617783063110133,data may leave edge; expected quality gain
+qedge_static,today,qhead_equal,False,real-time,60,48,0,12,0,0,0,0,53,60,0.05875032654805168,0.05875032654805168,expected quality gain; meets deadline
+qedge_adaptive,today,qhead_equal,False,real-time,60,48,0,12,0,0,0,0,53,60,0.05875032654805168,0.05875032654805168,expected quality gain; meets deadline
+qedge_static,future,qhead_equal,False,real-time,60,48,0,12,0,0,0,0,53,60,0.05875032654805168,0.05875032654805168,meets deadline
+qedge_adaptive,future,qhead_equal,False,real-time,60,48,0,12,0,0,0,0,53,60,0.05875032654805168,0.05875032654805168,meets deadline
+qedge_static,today,qhead_equal,False,batch job,60,44,0,16,0,0,0,60,60,60,0.000858384720344163,0.000858384720344163,expected quality gain
+qedge_adaptive,today,qhead_equal,False,batch job,60,44,0,16,0,0,0,60,60,60,0.000858384720344163,0.000858384720344163,expected quality gain
+qedge_static,future,qhead_equal,False,batch job,60,44,0,16,0,0,60,60,60,60,0.000858384720344163,0.000858384720344163,
+qedge_adaptive,future,qhead_equal,False,batch job,60,44,0,16,0,0,60,60,60,60,0.000858384720344163,0.000858384720344163,
+qedge_static,today,qhead_equal,True,real-time,60,60,0,0,0,0,0,0,45,0,,-79.4094492144134,data may leave edge; expected quality gain; meets deadline
+qedge_adaptive,today,qhead_equal,True,real-time,60,60,0,0,0,0,0,0,45,0,,-79.4094492144134,data may leave edge; expected quality gain; meets deadline
+qedge_static,future,qhead_equal,True,real-time,60,60,0,0,0,0,0,0,45,0,,-79.4094492144134,data may leave edge; meets deadline
+qedge_adaptive,future,qhead_equal,True,real-time,60,60,0,0,0,0,0,0,45,0,,-79.4094492144134,data may leave edge; meets deadline
+qedge_static,today,qhead_equal,True,batch job,60,60,0,0,0,0,0,0,60,0,,-6.617783063110133,data may leave edge; expected quality gain
+qedge_adaptive,today,qhead_equal,True,batch job,60,60,0,0,0,0,0,0,60,0,,-6.617783063110133,data may leave edge; expected quality gain
+qedge_static,future,qhead_equal,True,batch job,60,60,0,0,0,0,0,0,60,0,,-6.617783063110133,data may leave edge
+qedge_adaptive,future,qhead_equal,True,batch job,60,60,0,0,0,0,0,0,60,0,,-6.617783063110133,data may leave edge
+qedge_static,today,qhead_equal_private,False,real-time,60,48,0,12,0,0,0,0,53,60,0.05875032654805168,0.05875032654805168,expected quality gain; meets deadline
+qedge_adaptive,today,qhead_equal_private,False,real-time,60,48,0,12,0,0,0,0,53,60,0.05875032654805168,0.05875032654805168,expected quality gain; meets deadline
+qedge_static,future,qhead_equal_private,False,real-time,60,48,0,12,0,0,0,0,53,60,0.05875032654805168,0.05875032654805168,meets deadline
+qedge_adaptive,future,qhead_equal_private,False,real-time,60,48,0,12,0,0,0,0,53,60,0.05875032654805168,0.05875032654805168,meets deadline
+qedge_static,today,qhead_equal_private,False,batch job,60,44,0,16,0,0,0,60,60,60,0.000858384720344163,0.000858384720344163,expected quality gain
+qedge_adaptive,today,qhead_equal_private,False,batch job,60,44,0,16,0,0,0,60,60,60,0.000858384720344163,0.000858384720344163,expected quality gain
+qedge_static,future,qhead_equal_private,False,batch job,60,44,0,16,0,0,60,60,60,60,0.000858384720344163,0.000858384720344163,
+qedge_adaptive,future,qhead_equal_private,False,batch job,60,44,0,16,0,0,60,60,60,60,0.000858384720344163,0.000858384720344163,
+qedge_static,today,qhead_equal_private,True,real-time,60,60,0,0,0,0,0,0,45,60,0.0824069069218254,-79.4094492144134,expected quality gain; meets deadline
+qedge_adaptive,today,qhead_equal_private,True,real-time,60,60,0,0,0,0,0,0,45,60,0.0824069069218254,-79.4094492144134,expected quality gain; meets deadline
+qedge_static,future,qhead_equal_private,True,real-time,60,60,0,0,0,0,0,0,45,60,0.0824069069218254,-79.4094492144134,meets deadline
+qedge_adaptive,future,qhead_equal_private,True,real-time,60,60,0,0,0,0,0,0,45,60,0.0824069069218254,-79.4094492144134,meets deadline
+qedge_static,today,qhead_equal_private,True,batch job,60,60,0,0,0,0,0,60,60,60,0.002411682899606249,-6.617783063110133,expected quality gain
+qedge_adaptive,today,qhead_equal_private,True,batch job,60,60,0,0,0,0,0,60,60,60,0.002411682899606249,-6.617783063110133,expected quality gain
+qedge_static,future,qhead_equal_private,True,batch job,60,60,0,0,0,0,60,60,60,60,0.002411682899606249,-6.617783063110133,
+qedge_adaptive,future,qhead_equal_private,True,batch job,60,60,0,0,0,0,60,60,60,60,0.002411682899606249,-6.617783063110133,
