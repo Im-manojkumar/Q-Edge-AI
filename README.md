@@ -94,6 +94,8 @@ and qubits chosen for a workload, IBM's error map, and drift from logged traces)
 
 ![What-if tab](docs/dashboard_whatif.png)
 
+![Calibration tab](docs/dashboard_calibration.png)
+
 ## How a decision is made
 
 1. **Workload analysis.** Size, FLOPs, memory, input data, deadline, privacy, minimum quality, and, if it has

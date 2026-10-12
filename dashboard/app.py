@@ -294,13 +294,49 @@ with tabs[5]:
     fig.update_layout(height=280, margin=dict(t=10, b=10), yaxis_title="estimated success probability")
     st.plotly_chart(fig, use_container_width=True)
 
-    show = st.selectbox("Error map for device", list(summ.device), index=list(summ.device).index(best_dev))
-    try:
-        from qiskit.visualization import plot_error_map
-        cal = next(d for d in devs if d.name == show)
-        st.pyplot(plot_error_map(cal.backend, figsize=(11, 6)))
-    except Exception as e:  # plotting is a convenience; routing does not depend on it
-        st.caption(f"error map unavailable: {e}")
+    show = st.selectbox("Qubit map for device", list(summ.device), index=list(summ.device).index(best_dev))
+
+    @st.cache_data
+    def qubit_positions(device):
+        import rustworkx as rx
+        cal = next(d for d in devices(True) if d.name == device)
+        g = rx.PyGraph()
+        g.add_nodes_from(range(cal.num_qubits))
+        for a, b in cal.two_q:
+            if a < b:
+                g.add_edge(a, b, None)
+        pos = rx.spring_layout(g, seed=3, num_iter=2000)
+        return {q: tuple(pos[q]) for q in range(cal.num_qubits)}
+
+    import plotly.graph_objects as go
+    cal = next(d for d in devs if d.name == show)
+    pos = qubit_positions(show)
+    chosen = set(rank.loc[rank.device == show, "layout"].iloc[0]) if show in set(rank.device) else set()
+    figm = go.Figure()
+    for label, sel, color, width in [("coupler", lambda e: e < 0.01, "#d9d7d0", 2),
+                                     ("coupler, error >= 1%", lambda e: 0.01 <= e < calmod.BROKEN, "#eb6834", 3),
+                                     ("broken coupler", lambda e: e >= calmod.BROKEN, "#e34948", 5)]:
+        xs, ys = [], []
+        for (a, b), e in cal.two_q.items():
+            if a < b and sel(e):
+                xs += [pos[a][0], pos[b][0], None]
+                ys += [pos[a][1], pos[b][1], None]
+        figm.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=color, width=width), name=label,
+                                  hoverinfo="skip"))
+    qs = list(range(cal.num_qubits))
+    figm.add_trace(go.Scatter(
+        x=[pos[q][0] for q in qs], y=[pos[q][1] for q in qs], mode="markers", name="qubit (colour = readout error)",
+        marker=dict(size=[13 if q in chosen else 8 for q in qs], color=[cal.readout[q] for q in qs],
+                    colorscale="YlOrRd", cmin=0, cmax=0.05, colorbar=dict(title="readout error", thickness=10),
+                    line=dict(color=["#2a78d6" if q in chosen else "rgba(0,0,0,0)" for q in qs], width=3)),
+        text=[f"qubit {q}<br>readout error {cal.readout[q]:.4f}<br>T1 {cal.t1_us.get(q, float('nan')):.0f} us"
+              + ("<br><b>used by this workload</b>" if q in chosen else "") for q in qs],
+        hoverinfo="text"))
+    figm.update_layout(height=560, margin=dict(t=10, b=10), xaxis=dict(visible=False), yaxis=dict(visible=False),
+                       legend=dict(orientation="h", y=-0.02))
+    st.caption("Qubits outlined in blue are the ones this workload would use. Positions are a drawing of the "
+               "coupling graph, not the chip's physical layout.")
+    st.plotly_chart(figm, use_container_width=True)
 
     drift = calmod.drift_from_trace()
     if drift:

@@ -1,0 +1,4 @@
+predictor,spearman_all,spearman_within_circuit,picks_best_device
+static catalogue (v1),0.940190718074244,,
+best-region figures (cost model),0.6660810748947079,0.8139880952380953,0.625
+circuit ESP (router),0.8261078557040835,0.8839285714285715,0.625

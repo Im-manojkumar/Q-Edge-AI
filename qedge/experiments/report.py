@@ -129,8 +129,9 @@ def build(path: str = "REPORT.md", narrative: str = "docs/narrative.md"):
         parts.append(_md(e6[[c for c in cols if c in e6.columns]]))
         pr = _r("e6_prediction.csv")
         if pr is not None:
-            parts.append("\nHow well each predictor tracks measured fidelity (Spearman rank correlation; "
-                         "'within circuit' asks whether it ranks the devices correctly):\n")
+            parts.append("\nHow well each predictor tracks measured fidelity (Spearman rank correlation). 'All' mostly "
+                         "reflects that bigger circuits fail more, which any size-based predictor captures; 'within "
+                         "circuit' asks whether it ranks the devices correctly, which is what routing needs:\n")
             parts.append(_md(pr))
         parts.append("\n![](figures/e6_calibration_choice.png)\n\n![](figures/e6_calibration_prediction.png)\n")
     with open(path, "w") as f:

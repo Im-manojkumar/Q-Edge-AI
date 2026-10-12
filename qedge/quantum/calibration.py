@@ -28,7 +28,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 
-# Snapshot devices used when no IBM account is configured: two Eagle (ECR)
+# Snapshot devices used when no IBM account is configured: three Eagle (ECR)
 # and five Heron (CZ) generations, so device choice is a real trade-off.
 SNAPSHOT_DEVICES = ["FakeTorino", "FakeFez", "FakeMarrakesh", "FakeKingston", "FakeAachen",
                     "FakeBrisbane", "FakeSherbrooke", "FakeKyiv"]

@@ -18,6 +18,10 @@ while using 28% less edge energy and about 1/50th of its cloud spend. Quantum of
 choice only in a narrow, quantified region: wide, deep quantum-simulation circuits on hardware roughly 100x
 less noisy than today's, or optimisation instances where QAOA would beat the classical heuristic by about 0.24
 in approximation ratio at a few dollars per task. The framework detects both regimes automatically.
+When a QPU is used, *which* QPU and which qubits matter: routing each circuit by per-qubit calibration data
+cut the average output error by 37% against a fixed device (2.2x median reduction, up to 17x on small
+circuits) across 16 circuits on eight IBM device calibrations, and avoided broken qubit links that the
+default placement walked into.
 
 ## 1. Problem and approach
 
@@ -74,6 +78,7 @@ estimates. All modelling assumptions are in `docs/assumptions.md`.
 | E3 | Does Q-Edge place work better than simpler policies? | Discrete-event simulation, 800 mixed workloads × 3 seeds × 7 scenarios × 7 policies. The scheduler sees nominal resource figures; the simulator executes against hidden true ones. |
 | E4 | Where exactly is the quantum boundary? | Decision maps over circuit size and depth for today's and better QPUs, and over a hypothetical QAOA advantage and QPU price. |
 | E5 | Does the prototype run end to end? | Real payloads through the live orchestrator, and every quantum-capable job forced through classical, simulator and QPU-emulator paths. |
+| E6 | Does routing by calibration data pay off? | 16 TFIM, QAOA and kernel circuits (4 to 12 qubits) on eight IBM devices: v1's fixed device and default qubits vs the device and qubits chosen from per-qubit calibration, scored against the ideal output. |
 
 ## 3. Results
 
@@ -192,6 +197,46 @@ does, see 3.2); a Trotter circuit on the emulator came within 0.05 of the exact 
 the device's noise on a laptop, not a QPU time, so latency rows for it are not comparable. Predicted and measured quality agreed to within the per-run noise of
 the small test sets. The full table is in appendix A7.
 
+### 3.6 Calibration-aware routing (E6)
+
+v1 treated "the QPU" as one device with one set of error rates. Real providers expose many devices whose
+median error rates differ by about 7x and change daily, and within one chip some qubits and couplers are far worse
+than the median (IBM reports broken couplers with error 1.0). Q-Edge now reads every device's per-qubit
+calibration (free: it uses no QPU time), estimates each circuit's success probability (ESP) on every device
+and qubit placement, and routes to the best. Without an IBM account it uses calibration snapshots of eight
+real devices (three Eagle and five Heron chips) and emulates the chosen device with its own noise model.
+
+| | v1 (Torino, default qubits) | calibration-aware routing |
+|---|---|---|
+| Mean output error, 16 circuits | 0.095 | 0.059 (37% lower) |
+| Median error reduction per circuit | | 2.2x (range 1.1x to 17x) |
+| Picked the device that measured best | | 10 of 16; worst miss 0.009 fidelity |
+
+Three findings stand out:
+
+* **Device choice gives most of the gain.** The router picked the same device for every circuit (Aachen, the
+  snapshot with the lowest error rates), and it was the measured best or within 0.009 of it. With live data,
+  queues and daily calibration changes would make the choice move between devices. Keeping Torino but choosing its qubits
+  by calibration helped 13 of 16 circuits, by less.
+* **Calibration catches what averages hide.** On Sherbrooke, the default placement used a broken coupler in
+  7 of 16 circuits, giving fidelities of 0.38 to 0.72. Calibration-aware placement reached 0.75 to 0.98 on
+  the same device.
+* **Static figures cannot choose a device at all.** v1's single catalogue number predicts the same fidelity on
+  every device. Per-qubit ESP ranks devices for a given circuit with a Spearman correlation of 0.88 against
+  measured fidelity. It is a ranking tool rather than a quality forecast: an error-free run is sufficient
+  but not necessary for a good output, so measured fidelity sits above ESP.
+
+Qiskit's own optimisation level 3 already places qubits using average error data; our extra search over up
+to 4000 placements beat it in only 9 of 128 cases, by a tiny margin. The gain over v1 comes from choosing the
+device and from using that noise-aware placement, not from a better placement algorithm. Every number here
+comes from emulators built from the same calibration data the router reads, so this shows the routing works
+as designed; live hardware adds crosstalk and drift between calibrations, which the trace logger
+(`python -m qedge calibration log`) is built to measure.
+
+![](figures/e6_calibration_choice.png)
+
+![](figures/e6_calibration_prediction.png)
+
 ## 4. Answer to the project question
 
 * **Run locally on the edge CPU/GPU** when the data are private, the deadline is tight relative to upload
@@ -202,6 +247,8 @@ the small test sets. The full table is in appendix A7.
   fits and keeps a usable fidelity on the device, the quantum result is predicted to beat the best classical
   result, and queue, price and energy still fit the deadline and budget. On today's hardware none of our
   workloads met that bar; E4 maps where future hardware would.
+* **When a QPU is used, route by calibration.** Pick the device and qubits from today's per-qubit error data,
+  not a fixed device: E6 shows a 37% lower average output error and avoids broken couplers.
 
 That conclusion is the framework working as intended. The value of Q-Edge is that the decision is explicit,
 measured and re-evaluated as hardware improves: changing three numbers in the configuration (error rate,
@@ -218,6 +265,10 @@ queue, price) moves the boundary, and the dashboard shows it moving.
   the gap to the optimum, though not past the exact and annealing baselines on these instance sizes.
 * The MPS quality model for classical simulation beyond 32 qubits is the least-grounded assumption. It
   decides where the E4 boundary sits, so that boundary should be read as indicative.
+* E6 judges routing on emulators built from the same calibration snapshots the router reads, so it cannot show
+  crosstalk or drift. The snapshots are from different dates (2025 to 2026), so the comparison is between
+  device calibrations as published, not a same-day comparison. Device queues are only known with a live
+  account; without one the router ranks on error rates alone.
 * Small test sets in the live runs (10 to 30 points) make single-run accuracies noisy; E2 is the place for
   statistical comparison.
 
@@ -225,8 +276,8 @@ queue, price) moves the boundary, and the dashboard shows it moving.
 
 ```bash
 pip install -r requirements.txt
-pytest                                   # 63 tests
-python -m qedge experiments              # all five experiments, then REPORT.md
+pytest                                   # 73 tests
+python -m qedge experiments              # all six experiments, then REPORT.md
 python -m qedge dashboard
 ```
 
@@ -234,7 +285,7 @@ python -m qedge dashboard
 
 # Appendix: generated result tables
 
-Generated from `results/` by `python -m qedge report`. Run settings: `{"quick": false, "python": "3.13.16", "machine": "x86_64", "versions": {"qiskit": "2.5.2", "qiskit_aer": "0.17.2", "pennylane": "0.45.1", "cirq": "1.7.0", "amazon-braket-sdk": "1.127.3.post0"}, "timings_s": {"e2": 1299.7, "e1": 362.7, "e3": 18.2, "e4": 0.4, "e5": 290.7}}`
+Generated from `results/` by `python -m qedge report`. Run settings: `{"quick": false, "python": "3.13.16", "machine": "x86_64", "versions": {"qiskit": "2.5.2", "qiskit_aer": "0.17.2", "pennylane": "0.45.1", "cirq": "1.7.0", "amazon-braket-sdk": "1.127.3.post0"}, "timings_s": {"e2": 1299.7, "e1": 362.7, "e3": 18.2, "e4": 0.4, "e5": 290.7, "e6": 1261.7}}`
 
 ## A1. Stack agreement and speed (E1)
 
@@ -449,3 +500,38 @@ Calibration written for the cost model: `{"qaoa_gain": {"a": 1.7478396420712126,
 | forced:cloud_cpu+qpu | quantum_simulation | {'n': 6, 'steps': 4} | cloud_cpu+qpu | Trotter circuit | ibm-emulator:FakeTorino | ibm | 0.804 | 0.952 | 110 | 3.52 | 29.3 | - |
 | forced:edge_cpu | quantum_simulation | {'n': 12, 'steps': 8} | edge_cpu | state vector | - | - | 1 | 1 | 0.0304 | 0.0261 | 0 | - |
 | forced:cloud_cpu+quantum_sim | quantum_simulation | {'n': 12, 'steps': 8} | cloud_cpu+quantum_sim | Trotter circuit | qiskit-aer | - | 0.998 | 0.994 | 1.59 | 0.26 | 2.5e-05 | - |
+## A8. Calibration-aware routing (E6)
+
+Data: calibration snapshots of real IBM devices (local emulation of each device). Output error = 1 - Hellinger fidelity to the ideal distribution, 4000 shots.
+
+| case | n_qubits | v1_error | calibrated_error | calibrated_device | oracle_device | picked_oracle | static_pred | calibrated_esp |
+|---|---|---|---|---|---|---|---|---|
+| quantum n=4 steps=2 | 4 | 0.018 | 0.001 | fake_aachen | fake_marrakesh | False | 0.906 | 0.967 |
+| quantum n=4 steps=4 | 4 | 0.038 | 0.004 | fake_aachen | fake_marrakesh | False | 0.872 | 0.951 |
+| quantum n=6 steps=2 | 6 | 0.028 | 0.003 | fake_aachen | fake_aachen | True | 0.857 | 0.948 |
+| quantum n=6 steps=4 | 6 | 0.057 | 0.008 | fake_aachen | fake_aachen | True | 0.804 | 0.921 |
+| quantum n=8 steps=2 | 8 | 0.039 | 0.018 | fake_aachen | fake_aachen | True | 0.811 | 0.925 |
+| quantum n=8 steps=4 | 8 | 0.080 | 0.024 | fake_aachen | fake_marrakesh | False | 0.742 | 0.887 |
+| quantum n=10 steps=2 | 10 | 0.088 | 0.068 | fake_aachen | fake_marrakesh | False | 0.767 | 0.906 |
+| quantum n=10 steps=4 | 10 | 0.141 | 0.074 | fake_aachen | fake_aachen | True | 0.684 | 0.857 |
+| quantum n=12 steps=2 | 12 | 0.181 | 0.162 | fake_aachen | fake_kingston | False | 0.726 | 0.880 |
+| quantum n=12 steps=4 | 12 | 0.287 | 0.199 | fake_aachen | fake_aachen | True | 0.631 | 0.820 |
+| optimization n=6 | 6 | 0.008 | 0.007 | fake_aachen | fake_kingston | False | 0.862 | 0.959 |
+| optimization n=8 | 8 | 0.042 | 0.020 | fake_aachen | fake_aachen | True | 0.791 | 0.903 |
+| optimization n=10 | 10 | 0.105 | 0.091 | fake_aachen | fake_aachen | True | 0.697 | 0.840 |
+| optimization n=12 | 12 | 0.296 | 0.247 | fake_aachen | fake_aachen | True | 0.599 | 0.799 |
+| kernel features=4 | 4 | 0.025 | 0.002 | fake_aachen | fake_aachen | True | 0.867 | 0.955 |
+| kernel features=8 | 8 | 0.080 | 0.021 | fake_aachen | fake_aachen | True | 0.735 | 0.890 |
+
+How well each predictor tracks measured fidelity (Spearman rank correlation). 'All' mostly reflects that bigger circuits fail more, which any size-based predictor captures; 'within circuit' asks whether it ranks the devices correctly, which is what routing needs:
+
+| predictor | spearman_all | spearman_within_circuit | picks_best_device |
+|---|---|---|---|
+| static catalogue (v1) | 0.940 | - | - |
+| best-region figures (cost model) | 0.666 | 0.814 | 0.625 |
+| circuit ESP (router) | 0.826 | 0.884 | 0.625 |
+
+![](figures/e6_calibration_choice.png)
+
+![](figures/e6_calibration_prediction.png)
+

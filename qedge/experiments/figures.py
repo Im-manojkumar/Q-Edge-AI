@@ -205,11 +205,13 @@ def calibration_prediction(df: pd.DataFrame, out: str):
     for ax, col, title in [(axes[0], "static_pred", "static catalogue figures (v1)"),
                            (axes[1], "esp_best", "per-qubit calibration ESP (now)")]:
         for i, (dev, g) in enumerate(df.groupby("device")):
-            c = [BLUE, ORANGE, AQUA, YELLOW, MAGENTA, INK, MUTED, GRAY][i % 8]
+            c = [BLUE, ORANGE, AQUA, YELLOW, MAGENTA, "#6250d6", "#e34948", "#008300"][i % 8]
             ax.scatter(g[col], 1 - g.fidelity_best, s=14, color=c, label=dev.replace("fake_", ""), alpha=0.85)
         ax.set_xlabel("predicted success probability")
         ax.set_title(title)
     axes[0].set_ylabel("measured output error")
+    axes[0].annotate("one number per circuit:\ncannot tell devices apart", xy=(0.97, 0.95), xycoords="axes fraction",
+                     ha="right", va="top", fontsize=8, color=MUTED)
     axes[1].legend(fontsize=7, ncol=2)
     _save(fig, out)
 
