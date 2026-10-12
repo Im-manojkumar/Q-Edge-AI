@@ -1,6 +1,7 @@
 """Placement policies: the Q-Edge decision engine and the baselines it is compared to."""
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -34,6 +35,11 @@ class Decision:
     policy: str
     quantum_checks: dict[str, list[tuple[str, bool, str]]] = field(default_factory=dict)
     explored: bool = False
+    # Race mode (QEdgeHedgedPolicy): a classical placement started alongside the QPU job,
+    # used if the QPU result misses the deadline.
+    hedge: Placement | None = None
+    hedge_estimate: Estimate | None = None
+    hedge_p_miss: float | None = None   # estimated P(QPU queue > slack) behind the hedge verdict
 
     def explain(self) -> str:
         lines = [f"{self.policy}: workload {self.workload.id} ({self.workload.kind}) -> {self.placement.label}"]
@@ -45,6 +51,9 @@ class Decision:
             lines.append(f"  quantum gate for {label}: {verdict}")
             for name, ok, why in checks:
                 lines.append(f"    [{'pass' if ok else 'FAIL'}] {name}: {why}")
+        if self.hedge is not None:
+            lines.append(f"  hedged: P(miss deadline in QPU queue) ~ {self.hedge_p_miss:.2f}, so {self.hedge.label} "
+                         "runs in parallel as a fallback")
         return "\n".join(lines)
 
 
@@ -243,9 +252,86 @@ class QEdgeAdaptivePolicy(QEdgeCostPolicy):
         self.seen[key] += 1
 
 
+class QEdgeHedgedPolicy(QEdgeAdaptivePolicy):
+    """Q-Edge adaptive plus *race mode*: when it sends work to a real QPU and the
+    queue alone might blow the deadline, it also starts the best feasible
+    classical placement and keeps whichever answer is usable in time.
+
+    The miss probability is P(Q > slack), slack = deadline minus everything that
+    is not provider queue (host share, slot wait, rounds, execution; raw model
+    figures, not feedback-scaled). Q is modelled as exponential with mean = the
+    provider's published estimate x a learned bias. The bias is the censored
+    exponential MLE of (observed wait / published estimate): jobs cancelled in
+    the queue only tell us the wait was *at least* that long. With one
+    pseudo-observation at ratio 1 it starts at the provider's word.
+
+    The fallback is the best-scoring classical placement predicted to meet the
+    deadline; if there is none, the decision is not hedged. Hedging buys deadline
+    safety with classical compute that is wasted whenever the QPU answer arrives
+    in time; the simulator charges for both.
+    """
+
+    name = "qedge_hedged"
+    hedges = True
+
+    def __init__(self, resources, weights=None, seed=0, alpha=0.25, epsilon=0.01, threshold: float = 0.05,
+                 learn_queue_bias: bool = True):
+        super().__init__(resources, weights, seed, alpha, epsilon)
+        self.threshold = threshold
+        self.learn_queue_bias = learn_queue_bias
+        self._ratio_sum = 1.0      # sum of observed wait / published mean, censored waits included
+        self._uncensored = 1.0     # number of complete (uncensored) observations
+
+    @property
+    def queue_bias(self) -> float:
+        return self._ratio_sum / self._uncensored if self.learn_queue_bias else 1.0
+
+    def _queues(self, q: str) -> bool:
+        r = self.resources[q]
+        return r.is_quantum and not r.sim_gflops   # managed simulators have a short, steady queue
+
+    def miss_probability(self, w: Workload, e: Estimate, st: ResourceState) -> float:
+        q = e.placement.quantum
+        b = e.breakdown
+        non_queue = (b.get("queue", 0.0) + b.get("transfer", 0.0) + b.get("compute", 0.0)
+                     + b.get("q_rounds", 0.0) + b.get("q_exec", 0.0) + st.queue_wait_s.get(q, 0.0))
+        slack = w.deadline_s - non_queue
+        mean = st.qpu_queue_s.get(q, self.resources[q].queue_mean_s) * self.queue_bias
+        if slack <= 0:
+            return 1.0
+        return math.exp(-slack / mean) if mean > 0 else 0.0
+
+    def decide(self, w, st):
+        d = super().decide(w, st)
+        q = d.placement.quantum
+        if q is None or not self._queues(q):
+            return d
+        d.chosen.breakdown["q_published"] = st.qpu_queue_s.get(q, self.resources[q].queue_mean_s)
+        d.hedge_p_miss = self.miss_probability(w, d.chosen, st)
+        if d.hedge_p_miss > self.threshold:
+            # A fallback that is itself expected to be late would only add cost.
+            fallback = [e for e in d.estimates if not e.placement.is_hybrid and e.feasible
+                        and e.latency_s <= w.deadline_s]
+            if fallback:
+                e = min(fallback, key=lambda e: e.score)
+                d.hedge, d.hedge_estimate = e.placement, e
+        return d
+
+    def observe(self, decision, outcome):
+        super().observe(decision, outcome)
+        wait, published = outcome.get("qpu_queue_s"), decision.chosen.breakdown.get("q_published")
+        if wait is None or not published:
+            return
+        self._ratio_sum += wait / published
+        if not outcome.get("qpu_queue_censored", False):
+            self._uncensored += 1
+
+
 POLICIES = {cls.name: cls for cls in
             [EdgeOnly, CloudOnly, QuantumFirst, RandomPolicy, LatencyGreedy, QEdgeCostPolicy, QEdgeAdaptivePolicy]}
+# Kept out of POLICIES so the E3 policy matrix (and everything iterating POLICIES) is unchanged.
+EXTRA_POLICIES = {cls.name: cls for cls in [QEdgeHedgedPolicy]}
 
 
 def make_policy(name: str, resources, seed: int = 0, **kw) -> Policy:
-    return POLICIES[name](resources, seed=seed, **kw)
+    return {**POLICIES, **EXTRA_POLICIES}[name](resources, seed=seed, **kw)
