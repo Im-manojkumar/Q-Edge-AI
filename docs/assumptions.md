@@ -86,5 +86,9 @@ simulator those hidden values come from the scenario; the adaptive policy has to
 * Both paths run on one machine here, so they compete for CPU and for Python's GIL. The emulator holds the GIL for
   long stretches, so the thread waiting for the deadline can wake late. The report records this as
   `overshoot_s`. Race timings are therefore not the timings either path would have on its own hardware.
+  Whether the QPU made the deadline is judged by when its thread finished, not by when the waiting thread woke,
+  so a QPU result that lands in that gap is `late` and the classical result is delivered.
+* The live log line is written at delivery. If the QPU thread is still running then (`quantum_settled: false`),
+  the logged `quantum_status` is provisional; the final one is only on the in-memory `RaceInfo`.
 * When the QPU wins, the classical path is not stopped (it is local and short here). Its result is recorded when
   it finishes.

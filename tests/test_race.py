@@ -156,6 +156,19 @@ def test_register_after_cancel_cancels_immediately():
     assert job.cancel_calls == 1
 
 
+def _fake_sampler(job, tok):
+    """A SamplerV2 stand-in that hands back ``job`` and fires ``tok`` shortly after submission,
+    so the cancel always lands while result() is blocked (not during transpiling)."""
+    class FakeSampler:
+        def __init__(self, mode):
+            pass
+
+        def run(self, isa, shots):
+            threading.Timer(0.1, tok.cancel, args=("deadline",)).start()
+            return job
+    return FakeSampler
+
+
 def test_ibm_backend_registers_runtime_job(monkeypatch):
     """IBMQuantumBackend._run with Runtime mocked out: the job is registered and cancelled."""
     import qiskit_ibm_runtime
@@ -163,25 +176,34 @@ def test_ibm_backend_registers_runtime_job(monkeypatch):
 
     from qedge.quantum.backends.ibm_backend import IBMQuantumBackend
 
-    job = FakeRuntimeJob()
-
-    class FakeSampler:
-        def __init__(self, mode):
-            pass
-
-        def run(self, isa, shots):
-            return job
-
-    monkeypatch.setattr(qiskit_ibm_runtime, "SamplerV2", FakeSampler)
+    job, tok = FakeRuntimeJob(), CancelToken()
+    monkeypatch.setattr(qiskit_ibm_runtime, "SamplerV2", _fake_sampler(job, tok))
     be = IBMQuantumBackend("fake")
     be._backend = FakeManilaV2()
-    tok = CancelToken()
-    threading.Timer(0.3, tok.cancel).start()
     c = Circuit(2)
     c.h(0).cx(0, 1)
-    with pytest.raises(Cancelled):
+    with pytest.raises(Cancelled, match="job-123"):
         CancellableBackend(be, tok).run([c], 100)
-    assert job.cancel_calls == 1
+    assert job.cancel_calls == 1 and tok.jobs_cancelled == ["job-123"]
+
+
+def test_calibrated_backend_live_path_registers_runtime_job(monkeypatch):
+    """The live branch of ibm-auto (CalibratedIBMBackend with live calibrations), Runtime mocked out."""
+    import qiskit_ibm_runtime
+
+    from qedge.quantum.backends import CalibratedIBMBackend
+    from qedge.quantum.calibration import snapshot
+
+    job, tok = FakeRuntimeJob(), CancelToken()
+    monkeypatch.setattr(qiskit_ibm_runtime, "SamplerV2", _fake_sampler(job, tok))
+    be = CalibratedIBMBackend()
+    be._devices = [dataclasses.replace(snapshot("FakeManilaV2"), source="live")]
+    assert be.live and be.hardware
+    c = Circuit(2)
+    c.h(0).cx(0, 1)
+    with pytest.raises(Cancelled, match="job-123"):
+        CancellableBackend(be, tok).run([c], 100)
+    assert job.cancel_calls == 1 and tok.jobs_cancelled == ["job-123"]
 
 
 # ---------------------------------------------------------------- the race
@@ -222,6 +244,27 @@ def test_fast_qpu_long_deadline_quantum_wins(tmp_path):
     assert r.quantum_wall_s < 5 and r.delivered_s < 5 and r.qpu_ran_before_cancel_s is None
     assert r.overshoot_s == 0.0 and r.row()["winner"] == "quantum"
     assert r.wait_settled(5) and r.classical_result.mode == "classical"
+
+
+def test_qpu_finishing_after_the_deadline_is_late_even_if_noticed_late(tmp_path, monkeypatch):
+    """The waiting thread can wake well after the deadline while the emulator holds the GIL.
+    A QPU result that landed in that gap missed the deadline: classical is delivered."""
+    import qedge.orchestrator.engine as engine
+    real_wait = engine.wait
+
+    def late_wait(fs, timeout=None, **kw):
+        r = real_wait(fs, timeout=timeout, **kw)
+        if r.not_done:  # timed out at the deadline: wake up late, as under GIL contention
+            time.sleep(0.8)
+        return r
+
+    monkeypatch.setattr(engine, "wait", late_wait)
+    o = orch_with(tmp_path, FakeQPU(delay=0.5))
+    rep = o.submit(QSIM["kind"], n=5, steps=2, force=QSIM["force"], race=True, deadline_s=0.4)
+    r = rep.race
+    assert r.deadline_s < r.quantum_wall_s < r.delivered_s  # finished in the gap, before the late wake-up
+    assert rep.winner == "classical" and rep.quantum_status == "late" and rep.result.mode == "classical"
+    assert r.quantum_settled and r.quantum_result.mode == "hybrid" and r.qpu_ran_before_cancel_s is None
 
 
 def test_qpu_failure_classical_wins(tmp_path):

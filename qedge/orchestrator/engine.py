@@ -59,12 +59,17 @@ class RaceInfo:
     the deadline is measured on. ``quantum_status``:
 
       completed  the QPU result arrived before the deadline and was delivered
-      failed     the QPU path raised before the deadline; the classical result was delivered
+      failed     the QPU path raised (before the deadline, or after it but before it
+                 could be cancelled); the classical result was delivered
       cancelled  the deadline passed, the QPU work was cancelled and stopped
                  (``Cancelled`` at its next job, or the provider cancelled it)
-      late       the QPU work could not be stopped and finished after the deadline;
-                 its result is kept in ``quantum_result`` but was not delivered
-                 (or was, marked late, if the classical fallback had failed)
+      late       the QPU work finished after the deadline (it could not be stopped, or
+                 it ended between the deadline and the waiting thread waking up); its
+                 result is kept in ``quantum_result`` but was not delivered (or was,
+                 marked late, if the classical fallback had failed)
+
+    "Before the deadline" is judged by when the QPU thread finished, not by when the
+    waiting thread noticed, which can be late under GIL contention.
 
     A local emulator cannot be interrupted inside a job, so after a cancel its
     thread keeps running in the background until the job ends. Until then
@@ -360,10 +365,14 @@ class Orchestrator:
 
         info = RaceInfo(raced=True, deadline_s=deadline, fallback=fallback.placement.label)
         wait([fq], timeout=max(0.0, t_deadline - time.perf_counter()))
+        # Judge the QPU by when its thread finished, not by when this thread woke up: while
+        # the emulator holds the GIL the wake-up can be late, and a result that landed in
+        # that gap missed the deadline. (q_end is written before the future completes.)
+        q_on_time = fq.done() and marks.get("q_end", math.inf) <= t_deadline
         result: ExecResult | None = None
-        if fq.done() and fq.exception() is None:
+        if q_on_time and fq.exception() is None:
             result, info.winner, info.quantum_status = fq.result(), "quantum", "completed"
-        elif fq.done():  # the QPU path raised before the deadline
+        elif q_on_time:  # the QPU path raised before the deadline
             exc = fq.exception()
             info.quantum_status = "cancelled" if isinstance(exc, Cancelled) else "failed"
             info.quantum_error = _fmt(exc)
@@ -373,6 +382,10 @@ class Orchestrator:
                 result, info.winner, info.quantum_status = fq.result(), "quantum", "late"
             else:
                 info.quantum_status, info.quantum_error = "failed", _fmt(fq.exception())
+        elif fq.done():  # finished just after the deadline, before this thread woke: nothing to cancel
+            exc = fq.exception()
+            info.quantum_status = "late" if exc is None else "failed"
+            info.quantum_error = _fmt(exc) if exc is not None else None
         else:
             token.cancel(f"race deadline {deadline:.3g}s reached")
             info.quantum_status = "cancelled"
