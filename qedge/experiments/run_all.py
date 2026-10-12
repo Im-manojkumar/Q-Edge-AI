@@ -19,8 +19,6 @@ def save(frames: dict[str, pd.DataFrame], out_dir: str):
 
 def main(quick: bool = False, only: list[str] | None = None, out_dir: str = "results", fig_dir: str = "figures",
          qpu_stack: str = "ibm-auto"):
-    os.makedirs(out_dir, exist_ok=True)
-    os.makedirs(fig_dir, exist_ok=True)
     steps = {
         "e1": lambda: {"e1_stacks": e1_stacks.run(quick)},
         "e2": lambda: e2_quantum_vs_classical.run(quick, out_dir),
@@ -31,6 +29,13 @@ def main(quick: bool = False, only: list[str] | None = None, out_dir: str = "res
         "e7": lambda: {**e7_packing.run(quick), **e7_batching.run(quick), **e7_race.run(quick)},
         "e8": lambda: e8_split.run(quick, out_dir),
     }
+    # An unknown name would otherwise run nothing yet still rewrite run_meta.json and every
+    # figure, which looks like success; stop before touching anything.
+    unknown = sorted(set(only or ()) - set(steps))
+    if unknown:
+        raise SystemExit(f"unknown experiment step(s) {', '.join(unknown)}; this run_all has {', '.join(steps)}")
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(fig_dir, exist_ok=True)
     meta = {"quick": quick, "python": platform.python_version(), "machine": platform.machine(),
             "processor": platform.processor(), "started": time.strftime("%Y-%m-%d %H:%M:%S")}
     try:

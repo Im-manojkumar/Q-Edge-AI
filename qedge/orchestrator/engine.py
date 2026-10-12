@@ -41,6 +41,7 @@ from ..quantum.backends import CalibratedIBMBackend
 from ..quantum.backends.base import Cancelled, CancelToken
 from ..resources import Resource, ResourceState, load_catalogue
 from ..workloads import BUILDERS, Workload, load_calibration
+from . import split
 from .estimator import Estimate, Placement
 from .policies import Decision, Policy, make_policy
 
@@ -94,6 +95,9 @@ class RaceInfo:
     cancel_errors: list[str] = field(default_factory=list)
     classical_result: ExecResult | None = None
     quantum_result: ExecResult | None = None
+    # split_inference only: what the QPU path sends off the edge. That path starts in every
+    # race, so this has left the edge whichever result is delivered.
+    quantum_sent: str | None = None
 
     def wait_settled(self, timeout: float | None = None) -> bool:
         """Block until both race threads have ended and been recorded (an abandoned
@@ -131,6 +135,13 @@ class RaceInfo:
                 "quantum_error": self.quantum_error, "classical_error": self.classical_error}
 
     def summary(self) -> str:
+        out = self._summary()
+        if self.raced and self.quantum_sent and self.winner != "quantum":
+            out += (f"; the QPU path was started too and sends {self.quantum_sent} off the edge, so count "
+                    "that as having left it whatever was delivered")
+        return out
+
+    def _summary(self) -> str:
         if not self.raced:
             return f"race: {self.reason}"
         head = f"race vs {self.fallback} (deadline {self.deadline_s:.3g}s): "
@@ -186,6 +197,11 @@ class Report:
             lines.append(f"  executed {r.method} on {where}: {r.quality_metric} = {r.quality:.3f}, "
                          f"compute {r.compute_s:.3g}s, quantum {r.quantum_s:.3g}s, "
                          f"latency incl. modelled network {self.measured_latency_s:.3g}s")
+            if r.kind == "split_inference":
+                line = split_summary(r.details)
+                if self.raced and self.winner == "classical":   # the QPU path's share is in the race line
+                    line = line.replace("split:", "split (the delivered classical fallback):", 1)
+                lines.append("  " + line)
         if self.race is not None:
             lines.append("  " + self.race.summary())
         if self.error:
@@ -202,6 +218,31 @@ class Report:
         if self.race is not None:  # absent unless a race was asked for, so old logs keep their shape
             d["race"] = asdict(self.race)
         return d
+
+
+def split_summary(d: dict) -> str:
+    """One line on what a split_inference run cut where and what left the edge."""
+    if not d.get("left_edge"):
+        where = "whole model on the edge; nothing left it"
+    else:
+        names = ", ".join("the raw images" if t == "input" else f"the {t} activation" if t != "embedding"
+                          else f"the {d['k']}-number embedding" for t in d["left_edge"])
+        if "input" in d["left_edge"]:
+            cut = (f"{d['front']} ran the backbone on the uploaded images, the quantum head ran on {d['remote']}"
+                   if d.get("path") else f"whole model on {d['remote']}")
+        elif d.get("path"):
+            cut = f"edge ({d['front']}) ran up to the embedding, the quantum head ran on {d['remote']}"
+        else:
+            cut = f"edge ({d['front']}) ran up to {d['cut']}, {d['remote']} ran the rest"
+        where = (f"{cut}; left the edge: {names}, {d['bytes_up_per_image']:,} B per image, "
+                 f"{d['bytes_up_total']:,} B for {d['batch']} images (raw data left the edge: "
+                 f"{'yes' if d['raw_data_left_edge'] else 'no'})")
+    out = f"split: {where}"
+    if d.get("path"):
+        qpu = f", {d['qpu_s']:.3g} QPU-s modelled" if d.get("qpu_s") is not None else ""
+        out += (f"\n  quantum head: {d['jobs']} job(s), {d['circuits']} circuits ({d['path']}) on {d['device']}{qpu}; "
+                f"agrees with the exact quantum head on {d['agree_exact_quantum']:.0%} of images")
+    return out
 
 
 class Monitor:
@@ -255,9 +296,14 @@ class Orchestrator:
     def __init__(self, policy: str | Policy = "qedge_adaptive", sim_stack: str = "qiskit", qpu_stack: str = "ibm-auto",
                  config: str | None = None, log_path: str | None = "results/live_log.jsonl"):
         load_calibration()
+        try:   # the measured split profile (E8) when it exists, as for calibration.json
+            split.load_profiles(keep=True)
+        except ValueError as e:   # a malformed file: keep the built-in profiles, say so
+            log.warning("ignoring results/split_profile.json: %s", e)
+            split.load_profiles("", keep=True)
         self.resources = load_catalogue(config)
         self.policy = make_policy(policy, self.resources) if isinstance(policy, str) else policy
-        self.executor = Executor(sim_stack, qpu_stack)
+        self.executor = Executor(sim_stack, qpu_stack, self.resources)
         self.monitor = Monitor(self.resources, self.executor)
         self.log_path = log_path
         self._next_id = 0
@@ -280,15 +326,32 @@ class Orchestrator:
         deadline_s  the workload's deadline, passed to the workload builder exactly as
                     before; in a race it is also the wall-clock deadline from this call.
                     Defaults to the deadline the builder draws.
+
+        A split_inference race first loads the trained model (on a cold cache it is
+        trained: measured 27.6 s at k=4, 146 s at k=8), and the race clock starts after
+        that. Loading is setup, like importing the libraries; inside the race it would
+        hold both paths (the second waits on the first's training run, which cannot be
+        cancelled) and the fallback would arrive far past the deadline.
         """
+        if race and kind == "split_inference" and params.get("profile", "digits") == "digits":
+            prepare = getattr(self.executor, "prepare_split", None)   # absent on stand-in executors
+            if prepare is not None:
+                t0 = time.perf_counter()
+                try:
+                    prepare(int(params.get("k", split.DEFAULT_K)))
+                except Exception as e:   # e.g. k out of range: the run itself reports it
+                    log.warning("could not load the split model before the race: %s", e)
+                log.info("split model ready in %.3g s, before the race clock", time.perf_counter() - t0)
         t_submit = time.perf_counter()
         if deadline_s is not None:
             params["deadline_s"] = deadline_s
         w, d = self.plan(kind, **params)
         if force:  # run a specific placement anyway, e.g. to compare against the decision
             p = Placement.parse(force, self.resources)
-            est = next((e for e in d.estimates if e.placement == p), d.chosen)
-            d = Decision(w, p, est, d.estimates, d.policy + " (forced)", d.quantum_checks)
+            est = next((e for e in d.estimates if e.placement == p), None)
+            if est is None and w.kind == "split_inference":  # not a candidate (e.g. "cloud_cpu+qpu"): cost it
+                est = self.policy.model.estimate(w, p, self.monitor.snapshot(w))
+            d = Decision(w, p, est or d.chosen, d.estimates, d.policy + " (forced)", d.quantum_checks)
         race_info = None
         if race:
             fallback, why = self.race_fallback(d)
@@ -298,7 +361,7 @@ class Orchestrator:
         result, err = None, None
         t0 = time.perf_counter()
         try:
-            result = self.executor.run(w, d.placement.quantum)
+            result = self._execute(w, d.placement)
         except Exception as e:  # report, don't crash the service
             err = f"{type(e).__name__}: {e}"
         wall = time.perf_counter() - t0
@@ -311,6 +374,17 @@ class Orchestrator:
         rep = Report(w, d, result, latency, err, race_info)
         self._log(rep)
         return rep
+
+    def _execute(self, w: Workload, p: Placement, cancel: CancelToken | None = None, quantum: bool = True):
+        """Run ``w`` as placement ``p``. Only split_inference reads the placement (where the
+        network is cut); every other kind runs exactly as before, with the quantum
+        resource or classically (``quantum=False``: a race's classical path)."""
+        q = p.quantum if quantum else None
+        if w.kind == "split_inference":
+            return self.executor.run(w, q, cancel=cancel, placement=p)
+        if cancel is None and quantum:
+            return self.executor.run(w, q)
+        return self.executor.run(w, q, cancel=cancel)
 
     # ------------------------------------------------------------------ race mode
     def uses_qpu(self, p: Placement) -> bool:
@@ -351,19 +425,21 @@ class Orchestrator:
         t_deadline = t_submit + deadline
         marks: dict[str, float] = {}
 
-        def path(tag: str, q: str | None, cancel: CancelToken | None) -> ExecResult:
+        def path(tag: str, p: Placement, cancel: CancelToken | None) -> ExecResult:
             marks[f"{tag}_start"] = time.perf_counter()
             try:
-                return self.executor.run(w, q, cancel=cancel)
+                return self._execute(w, p, cancel, quantum=tag == "q")
             finally:
                 marks[f"{tag}_end"] = time.perf_counter()
 
         pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix=f"qedge-race-{w.id}")
-        fq = pool.submit(path, "q", d.placement.quantum, token)
-        fc = pool.submit(path, "c", None, None)
+        fq = pool.submit(path, "q", d.placement, token)
+        fc = pool.submit(path, "c", fallback.placement, None)
         pool.shutdown(wait=False)  # never block on an abandoned QPU thread
 
         info = RaceInfo(raced=True, deadline_s=deadline, fallback=fallback.placement.label)
+        if w.kind == "split_inference":
+            info.quantum_sent = split.sent_text(w, d.placement, self.resources)
         wait([fq], timeout=max(0.0, t_deadline - time.perf_counter()))
         # Judge the QPU by when its thread finished, not by when this thread woke up: while
         # the emulator holds the GIL the wake-up can be late, and a result that landed in
