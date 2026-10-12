@@ -300,13 +300,16 @@ class Simulator:
             wait = truth.breakdown.get("queue", 0.0)
             latency = wait + (truth.latency_s - wait) * noise
             quality = float(np.clip(truth.quality + qnoise, 0, 1))
-            busy_res = d.placement.quantum or d.placement.classical
-            busy_for = (truth.breakdown.get("q_rounds", 0) + truth.breakdown.get("q_exec", 0)) if d.placement.quantum \
-                else truth.breakdown.get("compute", 0.0) * noise
-            slots = free[busy_res]
-            k = int(np.argmin(slots))
-            start = max(t, slots[k]) + (truth.breakdown.get("transfer", 0.0) if not d.placement.quantum else 0.0)
-            slots[k] = start + busy_for
+            if d.placement.back is not None:
+                _occupy_split(free, t, d.placement, truth.breakdown, noise)
+            else:
+                busy_res = d.placement.quantum or d.placement.classical
+                busy_for = (truth.breakdown.get("q_rounds", 0) + truth.breakdown.get("q_exec", 0)) \
+                    if d.placement.quantum else truth.breakdown.get("compute", 0.0) * noise
+                slots = free[busy_res]
+                k = int(np.argmin(slots))
+                start = max(t, slots[k]) + (truth.breakdown.get("transfer", 0.0) if not d.placement.quantum else 0.0)
+                slots[k] = start + busy_for
             outcome = {"latency_s": latency, "quality": quality}
             if q in self.qpus:
                 outcome["qpu_queue_s"] = truth_state.qpu_queue_s[q] * noise
@@ -368,10 +371,13 @@ class Simulator:
         qnoise = float(aux.normal(0, 0.01))
         wait = tc.breakdown.get("queue", 0.0)
         latency = wait + (tc.latency_s - wait) * noise
-        slots = rs.free[d.hedge.classical]
-        k = int(np.argmin(slots))
-        start = max(w.arrival_s, slots[k]) + tc.breakdown.get("transfer", 0.0)
-        slots[k] = start + tc.breakdown.get("compute", 0.0) * noise
+        if d.hedge.back is not None:
+            _occupy_split(rs.free, w.arrival_s, d.hedge, tc.breakdown, noise)
+        else:
+            slots = rs.free[d.hedge.classical]
+            k = int(np.argmin(slots))
+            start = max(w.arrival_s, slots[k]) + tc.breakdown.get("transfer", 0.0)
+            slots[k] = start + tc.breakdown.get("compute", 0.0) * noise
         quality = float(np.clip(tc.quality + qnoise, 0, 1))
         # The fallback's outcome is observed like any classical run.
         rs.policy.observe(Decision(w, d.hedge, d.hedge_estimate, d.estimates, d.policy),
@@ -528,6 +534,19 @@ class Simulator:
         if f == 1.0 or m.truth.fidelity is None:
             return m.truth.quality
         return CostModel.quantum_quality(m.w, m.truth.fidelity * f)
+
+
+def _occupy_split(free: dict[str, list[float]], t: float, p, b: dict, noise: float) -> None:
+    """Reserve the slots of a classical split placement (split_inference): the edge front is
+    busy only for its share of the network, the upload then runs on the radio, and the cloud
+    back is busy for the rest of the network once the activation has arrived. (Every other
+    placement offsets its single slot by the transfer instead, which for an edge resource is 0.)"""
+    front = free[p.classical]
+    k = int(np.argmin(front))
+    front[k] = max(t, front[k]) + b.get("compute", 0.0) * noise
+    back = free[p.back]
+    kb = int(np.argmin(back))
+    back[kb] = max(front[k] + b.get("transfer", 0.0), back[kb]) + b.get("back_compute", 0.0) * noise
 
 
 def summarise(df: pd.DataFrame) -> pd.DataFrame:

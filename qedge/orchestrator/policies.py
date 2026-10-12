@@ -105,7 +105,10 @@ class QuantumFirst(Policy):
     name = "quantum_first"
 
     def decide(self, w, st):
-        return self._pick_by_preference(w, st, ["cloud_cpu+qpu", "edge_cpu+qpu", "cloud_gpu", "cloud_cpu"])
+        # The split labels only exist for split_inference (quantum head behind an edge backbone),
+        # so the order for every other kind is unchanged.
+        return self._pick_by_preference(w, st, ["cloud_cpu+qpu", "edge_cpu+qpu", "edge_gpu>embedding>qpu",
+                                                "edge_cpu>embedding>qpu", "cloud_gpu", "cloud_cpu"])
 
 
 class RandomPolicy(Policy):
@@ -167,13 +170,20 @@ class QEdgeCostPolicy(Policy):
             checks.append(("calibrated device", True, f"best qubit region of {e.qpu_device}"))
         else:
             checks.append(("fits device", qp.n_qubits <= q.max_qubits, f"{qp.n_qubits} of {q.max_qubits} qubits"))
-        checks.append(("data may leave edge", not w.privacy, "private" if w.privacy else "ok"))
+        split = w.kind == "split_inference"
+        if split:  # only the transmitted tensor matters: a private_ok embedding may leave
+            from .split import privacy_verdict, quality_note
+            ok, why = privacy_verdict(w, e.placement, self.resources)
+            checks.append(("data may leave edge", ok or not w.privacy, why if w.privacy else "ok"))
+        else:
+            checks.append(("data may leave edge", not w.privacy, "private" if w.privacy else "ok"))
         if e.fidelity is not None and not q.sim_gflops:
             checks.append(("circuit fidelity", e.fidelity >= self.min_fidelity,
                            f"estimated {e.fidelity:.3f} (min {self.min_fidelity})"))
         bq = best_classical.quality if best_classical and best_classical.feasible else 0.0
         checks.append(("expected quality gain", e.quality >= bq - self.quality_tolerance,
-                       f"quantum {e.quality:.3f} vs best classical {bq:.3f}"))
+                       f"{quality_note(w, e)} vs best classical head {bq:.3f}" if split
+                       else f"quantum {e.quality:.3f} vs best classical {bq:.3f}"))
         checks.append(("meets deadline", e.latency_s <= w.deadline_s,
                        f"{e.latency_s:.3g}s vs {w.deadline_s:.3g}s"))
         return checks
@@ -182,11 +192,11 @@ class QEdgeCostPolicy(Policy):
         ests = [self.adjust(w, e) for e in self.estimates(w, st)]
         classical = [e for e in ests if not e.placement.is_hybrid and e.feasible]
         best_c = min(classical, key=lambda e: self.score(w, e)) if classical else None
-        gate_log: dict[str, list] = {}
+        gate_log: dict[Placement, list] = {}
         for e in ests:
             if e.placement.is_hybrid:
                 checks = self.quantum_gate(w, e, best_c)
-                gate_log[e.placement.label] = checks
+                gate_log[e.placement] = checks
                 if not all(ok for _, ok, _ in checks):
                     e.feasible = False
                     e.reasons.extend(f"gate: {n}" for n, ok, _ in checks if not ok)
@@ -194,12 +204,21 @@ class QEdgeCostPolicy(Policy):
         feas = [e for e in ests if e.feasible] or ests
         best = min(feas, key=lambda e: e.score if e.score is not None else float("inf"))
         best, explored = self.maybe_explore(w, feas, best)
-        # One entry per quantum resource (the host choice does not change the gate verdict much).
+        # One entry per quantum resource. For the other kinds the host only runs a small classical
+        # share, so its choice barely changes the verdict and the cloud_cpu host is shown. For a split
+        # the edge front runs most of the network and can decide the deadline check, so show the
+        # variant the router actually picked, else the one that went furthest through the gate.
         qlog: dict[str, list] = {}
-        for label, checks in gate_log.items():
-            q = label.split("+", 1)[1]
-            if q not in qlog or label == best.placement.label or label.startswith("cloud_cpu"):
-                qlog[q] = checks
+        if w.kind == "split_inference":
+            by_p = {e.placement: e for e in ests}
+            def rank(p):
+                return (p == best.placement, sum(ok for _, ok, _ in gate_log[p]), -by_p[p].latency_s)
+            for p in sorted(gate_log, key=rank):
+                qlog[p.quantum] = gate_log[p]      # the best-ranked variant is written last
+        else:
+            for p, checks in gate_log.items():
+                if p.quantum not in qlog or p == best.placement or p.classical == "cloud_cpu":
+                    qlog[p.quantum] = checks
         return Decision(w, best.placement, best, ests, self.name, qlog, explored)
 
     def maybe_explore(self, w, feas, best):

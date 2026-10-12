@@ -1,15 +1,18 @@
 """AI workloads, their profiles, and a synthetic workload generator.
 
-Five workload kinds cover the spectrum the project asks about:
+Six workload kinds cover the spectrum the project asks about:
 
   inference            classical only (CNN-style batch inference)
   training             classical only (on-device fine-tuning)
   optimization         MaxCut-style combinatorial problem: classical solver, or hybrid QAOA
   kernel_classification small-data classifier: RBF-SVM, or hybrid quantum-kernel SVM
   quantum_simulation   spin-chain dynamics: classical state vector / MPS, or run natively on a QPU
+  split_inference      a split CNN: the router picks the cut between edge and cloud, and whether
+                       the head is classical or a small quantum circuit (orchestrator/split.py)
 
-Only the last three have a quantum formulation; the orchestrator never sends
-the first two to a QPU.
+Only the last four have a quantum formulation; the orchestrator never sends
+the first two to a QPU. split_inference is not in DEFAULT_MIX, so the default
+simulated workload stream is the same as before it existed.
 """
 from __future__ import annotations
 
@@ -18,8 +21,8 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
-KINDS = ["inference", "training", "optimization", "kernel_classification", "quantum_simulation"]
-QUANTUM_CAPABLE = {"optimization", "kernel_classification", "quantum_simulation"}
+KINDS = ["inference", "training", "optimization", "kernel_classification", "quantum_simulation", "split_inference"]
+QUANTUM_CAPABLE = {"optimization", "kernel_classification", "quantum_simulation", "split_inference"}
 
 
 @dataclass
@@ -233,8 +236,48 @@ def make_qsim(i, rng, **kw) -> Workload:
                     min_quality=float(kw.get("min_quality", 0.5)), quantum=qp, params={"n": n, "steps": steps})
 
 
+def make_split_inference(i, rng, **kw) -> Workload:
+    """A batch of images through a split model (profile "digits" or "camera", embedding size k).
+
+    head    classical head that classical placements serve: "best" (highest accuracy for k),
+            "linear" or "mlp"
+    qhead   "quantum" (the trained circuit) or "quantum_l0" (the L=0 ablation: encoding and
+            readout only)
+
+    Assumptions: the default deadline is log-uniform between 0.1 s and 1000 s (interactive to
+    batch jobs), half of the batches are private, min_quality 0.7 as for kernel
+    classification, and memory_gb 0.5 as for make_inference. The quantum profile carries the
+    head circuit after routing onto heavy-hex hardware (``split.routed_circuit``)."""
+    from .orchestrator import split
+    name = str(kw.get("profile", "digits"))
+    prof = split.get_profile(name)
+    k = int(kw.get("k", split.DEFAULT_K))
+    e = split.embedding(prof, k)
+    batch = int(kw.get("batch", rng.integers(1, 33)))
+    shots = int(kw.get("shots", 1000))
+    deadline = float(kw.get("deadline_s", 10 ** rng.uniform(-1, 3)))
+    privacy = bool(kw.get("privacy", rng.random() < 0.5))
+    head, qhead = str(kw.get("head", "best")), str(kw.get("qhead", "quantum"))
+    acc = e["accuracy"]
+    if head == "best":
+        head = max(split.HEADS, key=lambda h: acc[h])
+    if head not in split.HEADS or qhead not in split.QHEADS:
+        raise ValueError(f"head must be best/{'/'.join(split.HEADS)}, qhead {'/'.join(split.QHEADS)}")
+    qc = split.routed_circuit(e["quantum_circuit"] if qhead == "quantum" else split.head_circuit_stats(k, 0))
+    qp = QuantumProfile(n_qubits=k, depth=int(qc["depth"]), n_1q=int(qc["n_1q"]), n_2q=int(qc["n_2q"]),
+                        n_circuits=batch, shots=shots, n_rounds=1,
+                        algorithm=f"quantum classifier head ({k} qubits, {int(qc['layers'])} layers)")
+    return Workload(i, "split_inference", deadline_s=deadline, data_mb=batch * prof["input_bytes"] / 1e6,
+                    result_mb=batch * split.result_bytes(prof) / 1e6, privacy=privacy,
+                    min_quality=float(kw.get("min_quality", 0.7)), gflop=batch * split.total_flop(prof, k) / 1e9,
+                    memory_gb=0.5, parallel=True, classical_method=f"split CNN, {head} head",
+                    classical_quality=float(acc[head]), quantum=qp,
+                    params={"profile": name, "k": k, "batch": batch, "shots": shots, "head": head, "qhead": qhead})
+
+
 BUILDERS = {"inference": make_inference, "training": make_training, "optimization": make_optimization,
-            "kernel_classification": make_kernel, "quantum_simulation": make_qsim}
+            "kernel_classification": make_kernel, "quantum_simulation": make_qsim,
+            "split_inference": make_split_inference}
 
 DEFAULT_MIX = {"inference": 0.45, "training": 0.10, "optimization": 0.2,
                "kernel_classification": 0.15, "quantum_simulation": 0.10}
