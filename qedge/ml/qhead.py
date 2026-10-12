@@ -259,7 +259,9 @@ class QuantumHead:
         anything else runs on the emulator of the chosen device, where the
         labelled ``crosstalk_factor`` applies. On live devices the executor's
         limits apply before anything is submitted: at most QEDGE_HW_MAX_SHOTS
-        shots and QEDGE_HW_MAX_CIRCUITS packed jobs (one circuit each). QPU
+        shots and QEDGE_HW_MAX_CIRCUITS packed jobs (one circuit each). The job
+        count is the planned one: every group is allocated first, so samples
+        that do not fit and need extra jobs are counted before submission. QPU
         seconds and price come from ``packing_cost`` (catalogue figures and
         Braket-style pricing, both assumptions)."""
         from ..executor import HW_MAX_CIRCUITS, HW_MAX_SHOTS
@@ -268,22 +270,38 @@ class QuantumHead:
         devices, live = P._devices_from(cal_or_backend)
         circuits = self.to_circuits(Z)
         n = len(circuits)
-        if live and (shots > HW_MAX_SHOTS or -(-n // per_job) > HW_MAX_CIRCUITS):
-            raise RuntimeError(f"refusing {-(-n // per_job)} packed jobs x {shots} shots on real hardware "
-                               f"(limits QEDGE_HW_MAX_CIRCUITS={HW_MAX_CIRCUITS}, QEDGE_HW_MAX_SHOTS={HW_MAX_SHOTS})")
-        E = np.zeros((n, self.k))
-        regions: list[list[int] | None] = [None] * n
-        jobs: list[dict] = []
+        if live and shots > HW_MAX_SHOTS:
+            raise RuntimeError(f"refusing {shots} shots on real hardware (limit QEDGE_HW_MAX_SHOTS={HW_MAX_SHOTS})")
+        # Plan every job first (device choice and allocation do not depend on any result), so the
+        # real job count, including the extra jobs for samples that did not fit, is known before
+        # anything is submitted.
+        planned: list[tuple[list[int], object, object]] = []      # (sample indices, calibration, job)
         pending = list(range(n))
         t0 = time.perf_counter()
         while pending:
             idx = pending[:per_job]
             cal, alloc = P.select_packing_device(devices, [circuits[i] for i in idx], buffer)
             job = P.pack(cal, [circuits[i] for i in idx], buffer, allow_partial=True, allocation=alloc)
+            planned.append((idx, cal, job))
+            placed = {idx[p.index] for p in job.placements}
+            pending = [i for i in idx if i not in placed] + pending[per_job:]
+        n_live = sum(1 for _, cal, _ in planned if live and cal.source == "live")
+        if n_live > HW_MAX_CIRCUITS:
+            raise RuntimeError(f"refusing {n_live} packed jobs x {shots} shots on real hardware "
+                               f"(limits QEDGE_HW_MAX_CIRCUITS={HW_MAX_CIRCUITS}, QEDGE_HW_MAX_SHOTS={HW_MAX_SHOTS}); "
+                               f"{n} samples, at most {max(j.k for _, _, j in planned)} fit per job")
+        E = np.zeros((n, self.k))
+        regions: list[list[int] | None] = [None] * n
+        jobs: list[dict] = []
+        submitted = 0
+        for idx, cal, job in planned:
             job_id = None
             if live and cal.source == "live":  # tested in local mode only (fake backend), never on a real account
+                if submitted >= HW_MAX_CIRCUITS:   # belt and braces: the plan above already enforces this
+                    raise RuntimeError(f"refusing live job {submitted + 1} (QEDGE_HW_MAX_CIRCUITS={HW_MAX_CIRCUITS})")
                 from qiskit_ibm_runtime import SamplerV2
                 rjob = SamplerV2(mode=cal.backend).run([job.circuit], shots=shots)
+                submitted += 1
                 pub = rjob.result()[0]
                 counts = P.split_counts(job, {r: getattr(pub.data, r).get_counts() for r in job.registers})
                 job_id = rjob.job_id()
@@ -294,7 +312,6 @@ class QuantumHead:
                 E[idx[p.index]] = expz_from_counts(cnt, self.k)
                 regions[idx[p.index]] = list(p.qubits)
             placed = {idx[p.index] for p in job.placements}
-            pending = [i for i in idx if i not in placed] + pending[per_job:]
             jobs.append({"device": cal.name, "calibration": cal.source, "emulated": job_id is None,
                          "job_id": job_id, "samples": sorted(placed), "k": job.k,
                          "unplaced": len(idx) - len(placed), "depth": job.depth,

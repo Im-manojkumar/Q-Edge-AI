@@ -17,10 +17,19 @@ Attacker model (honest-but-curious remote party):
   held-out inputs (the test split).
 
 Decoders: ridge regression (closed form on standardised activations, penalty
-chosen on the validation split) and scikit-learn's ``MLPRegressor`` with one
-hidden layer. Both know pixels lie in [0, 1] and clip to it. Each metric is
-reported for the strongest decoder on that metric ("strongest of the attacks
-we tried"), which is the conservative reading for privacy.
+chosen on the validation split), scikit-learn's ``MLPRegressor`` with one
+hidden layer, and k-nearest-neighbour regression (the mean of the training
+images whose activations are nearest; the number of neighbours and raw versus
+standardised activations are chosen on the validation split, separately for
+each metric). All know pixels lie in [0, 1]. Each metric is reported for the
+strongest decoder on that metric ("strongest of the attacks we tried"), which
+is the conservative reading for privacy. The kNN decoder was added after a
+review: on the k-dim embedding (transfer backbones, seed 0, k = 2..8) it
+re-identified 11 to 47 of the 360 test images against 7 to 24 for the better
+of ridge and the MLP (k=4: 38 against 13), so a verdict from the weaker
+attack set was too generous. With it, and with the per-image count below, the
+embedding fails the default rule at every k measured (12, 10, 35, 25, 44 and
+37 images beyond the label for k = 2, 3, 4, 5, 6, 8; the limit is 5).
 
 Metrics on the N test images:
 
@@ -33,12 +42,20 @@ Metrics on the N test images:
 * ``reid``: re-identification rate. A test image is re-identified when its own
   original is the nearest (pixel L2) of all N test originals to its
   reconstruction; chance is 1/N. ``reid_top5`` is the top-5 rate.
-  ``reid_label`` is the rate of the label-only baseline and
-  ``reid_beyond_label = reid - reid_label``.
+  ``reid_label`` is the rate of the label-only baseline.
+* ``reid_beyond_label``: counted per image, the fraction of test images that a
+  decoder re-identifies and the label-only baseline does not, maximised over
+  decoders. This is what the tensor reveals beyond the label: a party that
+  knows the label too re-identifies ``reid_with_label = reid_label +
+  reid_beyond_label``. (A difference of rates, ``reid_minus_label = reid -
+  reid_label``, is reported for reference only: the two rates count different
+  images, so it understates the leakage, e.g. a decoder that re-identifies 8
+  images, 7 of them not the label's 10, has a negative difference.)
 
 ``private_ok`` is the router's feasibility rule. Its thresholds are policy
 parameters (an assumption, not a standard): by default r2_beyond_label <= 0.10
-and reid_beyond_label <= 5 x chance. The reid limit is applied beyond the label
+and reid_beyond_label <= 5 x chance (at most 5 test images in 360 that only the
+tensor gives away). The reid limit is applied beyond the label
 for the same reason r2 is: whoever runs the remote half computes the output,
 so it learns the label whatever the cut. The label alone re-identifies one
 image per class (the one nearest its class mean), about classes / N: 10/360 =
@@ -53,7 +70,9 @@ import warnings
 
 import numpy as np
 
-ATTACKS = ("ridge", "mlp")
+ATTACKS = ("ridge", "mlp", "knn")
+METRICS = ("r2", "reid", "reid_top5")
+KNN_NEIGHBOURS = (1, 2, 3, 5, 10, 20, 40)
 RIDGE_ALPHAS = (1e-6, 1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0, 1000.0)
 DEFAULT_REID_X_CHANCE = 5.0      # policy assumption: at most 5x the chance re-identification rate
 DEFAULT_MAX_R2_BEYOND_LABEL = 0.10
@@ -71,14 +90,20 @@ def r2_pixels(X, Xhat) -> float:
     return 1.0 - float(((X - Xhat) ** 2).sum()) / sst
 
 
-def reid_rates(X, Xhat, top: int = 5) -> tuple[float, float]:
-    """(top-1, top-``top``) rate at which an image's own original is among the nearest
-    originals to its reconstruction. Only strictly closer originals count against it."""
+def reid_ranks(X, Xhat) -> np.ndarray:
+    """For each image, how many other originals are strictly closer (pixel L2) to its
+    reconstruction than its own original; 0 means re-identified."""
     from scipy.spatial.distance import cdist
     X, Xhat = _flat(X), _flat(Xhat)
     d = cdist(Xhat, X)
     own = np.diag(d)
-    rank = (d < own[:, None]).sum(axis=1)
+    return (d < own[:, None]).sum(axis=1)
+
+
+def reid_rates(X, Xhat, top: int = 5) -> tuple[float, float]:
+    """(top-1, top-``top``) rate at which an image's own original is among the nearest
+    originals to its reconstruction. Only strictly closer originals count against it."""
+    rank = reid_ranks(X, Xhat)
     return float(np.mean(rank == 0)), float(np.mean(rank < top))
 
 
@@ -130,30 +155,72 @@ def mlp_decoder(Htr, Xtr, Hval, Xval, seed: int = 0, hidden: int = 256, max_iter
     return dec, {"hidden": hidden, "iterations": int(reg.n_iter_), "val_r2": r2_pixels(Xval, dec(Hval))}
 
 
+def knn_decoder(Htr, Xtr, Hval, Xval, neighbours=KNN_NEIGHBOURS):
+    """k-nearest-neighbour regression: the mean training image of the nearest training
+    activations. The number of neighbours and whether activations are standardised are
+    chosen on the validation split, once per metric in ``METRICS`` (ties: the earlier
+    candidate, i.e. raw before standardised, fewer neighbours first).
+    Returns ({metric: decode function}, info)."""
+    from sklearn.neighbors import KNeighborsRegressor
+    Htr, Xtr, Hval, Xval = _flat(Htr), _flat(Xtr), _flat(Hval), _flat(Xval)
+    sc = _Standardise(Htr)
+    cands = []
+    for scaled in (False, True):
+        f = sc if scaled else (lambda H: H)
+        for nn in neighbours:
+            reg = KNeighborsRegressor(n_neighbors=min(nn, len(Htr))).fit(f(Htr), Xtr)
+            rec = reg.predict(f(Hval))
+            top1, top5 = reid_rates(Xval, rec)
+            cands.append(({"r2": r2_pixels(Xval, rec), "reid": top1, "reid_top5": top5}, nn, scaled, reg, f))
+    decs, info = {}, {}
+    for m in METRICS:
+        val, nn, scaled, reg, f = max(cands, key=lambda c: c[0][m])          # max keeps the first of ties
+        decs[m] = (lambda reg, f: lambda H: np.clip(reg.predict(f(_flat(H))), 0.0, 1.0))(reg, f)
+        info[m] = {"neighbours": nn, "standardised": scaled, f"val_{m}": val[m]}
+    return decs, {"chosen": info}
+
+
 def attack(Htr, Hval, Hte, Xtr, Xval, Xte, ytr, yte, attacks=ATTACKS, seed: int = 0) -> dict:
-    """Fit every decoder on (Htr, Xtr), evaluate on the test split; strongest per metric."""
+    """Fit every decoder on (Htr, Xtr), evaluate on the test split; strongest per metric.
+
+    Besides the rates, each decoder's re-identified test images are compared one by one
+    with those of the label-only baseline, giving ``reid_beyond_label`` (see the module
+    docstring); the reported value is the maximum over decoders."""
     n = len(Xte)
     base = label_baseline(Xtr, ytr, yte)
     r2_label = r2_pixels(Xte, base)
-    reid_label, _ = reid_rates(Xte, base)
+    label_hits = reid_ranks(Xte, base) == 0
+    reid_label = float(label_hits.mean())
     per = {}
     for name in attacks:
         if name == "ridge":
             dec, info = ridge_decoder(Htr, Xtr, Hval, Xval)
+            decs = dict.fromkeys(METRICS, dec)
         elif name == "mlp":
             dec, info = mlp_decoder(Htr, Xtr, Hval, Xval, seed=seed)
+            decs = dict.fromkeys(METRICS, dec)
+        elif name == "knn":
+            decs, info = knn_decoder(Htr, Xtr, Hval, Xval)
         else:
             raise ValueError(f"unknown attack {name!r}; choose from {ATTACKS}")
-        rec = dec(Hte)
-        top1, top5 = reid_rates(Xte, rec)
-        per[name] = {"r2": r2_pixels(Xte, rec), "reid": top1, "reid_top5": top5, **info}
-    best = {m: max(per, key=lambda a: (per[a][m], a == "ridge")) for m in ("r2", "reid", "reid_top5")}
-    r2 = per[best["r2"]]["r2"]
+        recs = {}
+        for m in METRICS:                              # one reconstruction per distinct decoder
+            recs.setdefault(id(decs[m]), decs[m](Hte))
+        rank_reid = reid_ranks(Xte, recs[id(decs["reid"])])
+        hits = rank_reid == 0
+        per[name] = {"r2": r2_pixels(Xte, recs[id(decs["r2"])]), "reid": float(hits.mean()),
+                     "reid_top5": float(np.mean(reid_ranks(Xte, recs[id(decs["reid_top5"])]) < 5)),
+                     "reid_beyond_label": float(np.mean(hits & ~label_hits)),
+                     "reid_with_label": float(np.mean(hits | label_hits)), **info}
+    keys = METRICS + ("reid_beyond_label",)
+    best = {m: max(per, key=lambda a: (per[a][m], a == "ridge")) for m in keys}
+    r2, reid = per[best["r2"]]["r2"], per[best["reid"]]["reid"]
+    beyond = per[best["reid_beyond_label"]]["reid_beyond_label"]
     return {"values": int(_flat(Hte).shape[1]), "n_test": n, "chance": 1.0 / n,
             "r2": r2, "r2_label": r2_label, "r2_beyond_label": r2 - r2_label,
-            "reid": per[best["reid"]]["reid"], "reid_top5": per[best["reid_top5"]]["reid_top5"],
-            "reid_label": reid_label, "reid_beyond_label": per[best["reid"]]["reid"] - reid_label,
-            "strongest": best, "attacks": per}
+            "reid": reid, "reid_top5": per[best["reid_top5"]]["reid_top5"],
+            "reid_label": reid_label, "reid_beyond_label": beyond, "reid_with_label": reid_label + beyond,
+            "reid_minus_label": reid - reid_label, "strongest": best, "attacks": per}
 
 
 def leakage_report(model, data, cuts=("input", "conv1", "conv2", "embedding"), attacks=ATTACKS,
@@ -175,16 +242,25 @@ def private_ok(stats: dict, max_reid: float | None = None,
                max_r2_beyond_label: float = DEFAULT_MAX_R2_BEYOND_LABEL, relative_to_label: bool = True) -> bool:
     """Feasibility rule for sending this tensor off the edge (policy thresholds, an assumption):
     r2_beyond_label <= ``max_r2_beyond_label`` and re-identification <= ``max_reid``
-    (default 5 x chance), measured beyond the label-only baseline unless
-    ``relative_to_label=False`` (see the module docstring for why)."""
+    (default 5 x chance). By default re-identification is ``reid_beyond_label``, the
+    per-image count of test images re-identified that the label alone does not give
+    away (see the module docstring); ``relative_to_label=False`` uses the absolute
+    ``reid``. A verdict holds against the attacks that produced ``stats`` only."""
     limit = DEFAULT_REID_X_CHANCE * stats["chance"] if max_reid is None else max_reid
-    reid = stats["reid"] - stats["reid_label"] if relative_to_label else stats["reid"]
+    if relative_to_label:
+        if "reid_beyond_label" not in stats:
+            raise KeyError("private_ok needs the per-image 'reid_beyond_label' (from attack/leakage_report); "
+                           "a difference of rates understates it")
+        reid = stats["reid_beyond_label"]
+    else:
+        reid = stats["reid"]
     return bool(reid <= limit and stats["r2_beyond_label"] <= max_r2_beyond_label)
 
 
 def privacy_reason(stats: dict, cut: str | None = None) -> str:
     """One line saying what the attack achieved at this cut, for decision logs."""
     name = cut or stats.get("cut", "this cut")
-    return (f"{name} activations re-identify {stats['reid']:.0%} of inputs (label alone {stats['reid_label']:.1%}, "
-            f"chance {stats['chance']:.1%}) and explain {stats['r2_beyond_label']:+.2f} of pixel variance beyond "
+    beyond = f", {stats['reid_beyond_label']:.1%} that the label does not" if "reid_beyond_label" in stats else ""
+    return (f"{name} activations re-identify {stats['reid']:.0%} of inputs{beyond} (label alone "
+            f"{stats['reid_label']:.1%}, chance {stats['chance']:.1%}) and explain {stats['r2_beyond_label']:+.2f} of pixel variance beyond "
             f"the label, against the strongest of the attacks we tried")

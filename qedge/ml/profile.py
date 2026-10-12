@@ -17,15 +17,24 @@ here because they are choices):
 
 * sizes and FLOPs are per sample; bytes are float32 activations;
 * the shared cuts (input, conv1, conv2) come from one backbone per k. Their
-  sizes and front FLOPs do not depend on k; their back FLOPs are taken from
-  ``ref_k`` (the dense 64->k layer and a linear head change the back FLOPs by
-  under 1000 across k = 2..8, out of about 46 000); their leakage is the WORST over all k (highest reid and
+  sizes and front FLOPs do not depend on k. Their back FLOPs do (the dense
+  64->k layer plus the linear head, 2*64*k + 2*k*10 = 148k): ``back_flop`` is
+  taken from ``ref_k`` and ``back_flop_by_k`` holds every k. For input and
+  conv1 the spread over k = 2..8 is small next to the convolutions (46 376 to
+  47 264 for input); for conv2 the back FLOPs ARE that layer, 296 at k=2 to
+  1184 at k=8, so ``back_flop`` (592 at ref_k=4) is off by up to 2x there.
+  Their leakage is the WORST over all k (highest reid, reid_beyond_label and
   r2_beyond_label) and they are private only if private for every k;
-* an embedding's back FLOPs are those of the best classical head for that k
-  (the head whose accuracy the router uses as classical quality);
-* accuracies are test-split accuracies measured by the caller;
+* the classical head of each k (``classical_head``) is the one of linear and
+  MLP with the higher VALIDATION accuracy (ties: linear, the smaller); its
+  test accuracy is ``classical_accuracy`` and its FLOPs are the embedding's
+  back FLOPs. Picking the higher test accuracy instead would be model
+  selection on the test split; ``classical_selected_on`` says which was used
+  (the caller may omit validation accuracies, then it is "test", optimistic);
+* accuracies under ``accuracy`` are test-split accuracies measured by the caller;
 * ``private_ok`` is recomputed here with ``leakage.private_ok`` and the
-  thresholds passed in, so the policy lives in one place.
+  thresholds passed in, so the policy lives in one place. A True verdict holds
+  only against the attacks listed under ``privacy`` (see ``leakage``).
 """
 from __future__ import annotations
 
@@ -33,6 +42,7 @@ from . import leakage as L
 
 SHARED_CUTS = ("input", "conv1", "conv2")
 ACC_KEYS = ("linear", "mlp", "quantum", "quantum_l0")
+CLASSICAL = ("linear", "mlp")
 PARAM_KEYS = ("linear", "mlp", "quantum")
 CIRCUIT_KEYS = ("n_qubits", "layers", "depth", "n_1q", "n_2q")
 CUT_KEYS = ("name", "values", "bytes", "front_flop", "back_flop", "reid", "r2_beyond_label", "private_ok")
@@ -53,7 +63,8 @@ def measured_profile(per_k: dict, name: str = "digits", label: str | None = None
     ``per_k[k]`` holds, for the model with embedding size k:
     ``cut_stats`` (``SplitCNN.cut_stats()``), ``leakage`` (``leakage_report`` rows for
     input, conv1, conv2, embedding), ``accuracy`` (test accuracy per head in
-    ``ACC_KEYS``), ``params`` (per head in ``PARAM_KEYS``), ``quantum_circuit``
+    ``ACC_KEYS``), optionally ``val_accuracy`` (validation accuracy per head, used to
+    pick the classical head), ``params`` (per head in ``PARAM_KEYS``), ``quantum_circuit``
     (``QuantumHead.circuit_profile()``) and optionally ``head_flop`` (classical
     FLOPs per sample per head; default: the head FLOPs in ``cut_stats``)."""
     if not per_k:
@@ -72,27 +83,41 @@ def measured_profile(per_k: dict, name: str = "digits", label: str | None = None
         s = ref_stats[cut]
         cuts.append({"name": cut, "values": int(s["values"]), "bytes": int(s["bytes"]),
                      "front_flop": float(s["front_flop"]), "back_flop": float(s["back_flop"]),
+                     "back_flop_by_k": {str(k): float(_by_name(get(k)["cut_stats"], "name")[cut]["back_flop"])
+                                        for k in ks},
                      "reid": float(max(r["reid"] for r in leaks)),
+                     "reid_beyond_label": float(max(r["reid_beyond_label"] for r in leaks)),
                      "r2_beyond_label": float(max(r["r2_beyond_label"] for r in leaks)),
                      "reid_label": float(max(r["reid_label"] for r in leaks)),
                      "private_ok": all(ok(r) for r in leaks)})
-    emb = {}
+    emb, attacks = {}, set()
     for k in ks:
         m = get(k)
         s = _by_name(m["cut_stats"], "name")["embedding"]
         leak = _by_name(m["leakage"], "cut")["embedding"]
+        attacks |= set(leak.get("attacks", {}))
         acc = {h: float(m["accuracy"][h]) for h in ACC_KEYS}
-        best = max(("linear", "mlp"), key=lambda h: acc[h])
+        val = m.get("val_accuracy")
+        on = "validation" if val else "test"
+        sel = val if val else acc
+        best = max(CLASSICAL, key=lambda h: (sel[h], h == "linear"))
         head_flop = (m.get("head_flop") or {}).get(best, s["head_flop"])
         emb[str(k)] = {"bytes": int(s["bytes"]), "front_flop": float(s["front_flop"]),
                        "back_flop": float(head_flop), "reid": float(leak["reid"]),
+                       "reid_beyond_label": float(leak["reid_beyond_label"]),
                        "r2_beyond_label": float(leak["r2_beyond_label"]), "reid_label": float(leak["reid_label"]),
                        "private_ok": ok(leak), "accuracy": acc,
+                       "classical_head": best, "classical_accuracy": acc[best], "classical_selected_on": on,
                        "quantum_circuit": {c: int(m["quantum_circuit"][c]) for c in CIRCUIT_KEYS},
                        "params": {h: int(m["params"][h]) for h in PARAM_KEYS}}
+    limit = "5 x chance" if max_reid is None else f"{max_reid:g}"
+    rule = (f"reid {'beyond the label (per image)' if relative_to_label else '(absolute)'} <= {limit}, "
+            f"r2_beyond_label <= {max_r2_beyond_label:g}")
     return {"name": name, "label": label or f"{name}: 8x8 CNN backbone, k-dim embedding, classical or quantum head",
             "source": source, "classes": int(classes), "input_bytes": int(ref_stats["input"]["bytes"]),
-            "cuts": cuts, "embedding": emb}
+            "cuts": cuts, "embedding": emb,
+            "privacy": {"attacks": sorted(attacks), "rule": rule,
+                        "note": "private_ok holds against these attacks only; a stronger attacker could do better"}}
 
 
 def validate_profile(p: dict) -> None:
@@ -116,11 +141,13 @@ def validate_profile(p: dict) -> None:
 
 def summarise(transfer, Xte, yte, leakage_rows: list[dict]) -> dict:
     """One ``per_k`` entry from a ``nets.TransferResult``: evaluates every head on the
-    test split once (no training) and collects sizes, parameters and the circuit."""
+    test split once (no training) and collects validation accuracies (from the fits),
+    sizes, parameters and the circuit."""
     heads = transfer.heads
     q = heads["quantum"]
     return {"cut_stats": transfer.model.cut_stats(), "leakage": leakage_rows,
             "accuracy": {h: transfer.accuracy(h, Xte, yte) for h in ACC_KEYS if h in heads},
+            "val_accuracy": {h: float(transfer.fits[h].best_val_acc) for h in ACC_KEYS if h in transfer.fits},
             "params": {h: int(heads[h].n_params) for h in PARAM_KEYS if h in heads},
             "head_flop": {h: float(heads[h].flop) for h in ("linear", "mlp") if h in heads},
             "quantum_circuit": q.circuit_profile()}

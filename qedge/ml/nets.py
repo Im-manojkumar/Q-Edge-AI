@@ -55,6 +55,12 @@ CUTS = ("input", "conv1", "conv2", "embedding")
 SHAPES = {"input": (1, 8, 8), "conv1": (8, 4, 4), "conv2": (16, 2, 2)}   # embedding: (k,)
 FLOAT_BYTES = 4                                                          # activations are sent as float32
 
+# Training settings behind the reported numbers (seed 0 measurements); the defaults of
+# train_end_to_end / train_transfer (backbone) and train_head (heads on frozen embeddings).
+# Any keyword passed explicitly overrides the matching entry.
+BACKBONE_FIT = {"epochs": 60, "lr": 0.003, "batch": 32, "patience": 10}
+HEAD_FIT = {"epochs": 60, "lr": 0.03, "batch": 32, "patience": 10}
+
 
 # ---- layers --------------------------------------------------------------------
 def conv3x3(x, w, b):
@@ -308,14 +314,25 @@ class SplitCNN:
                          "back_flop": float(total - front + head), "head_flop": float(head)})
         return rows
 
-    def save(self, path: str) -> None:
+    def save(self, path: str) -> str:
+        """Write an .npz archive (``.npz`` is appended when ``path`` lacks it, as np.savez
+        does) and return the path actually written."""
+        path = str(path)
+        if not path.endswith(".npz"):
+            path += ".npz"
         arrays = {f"backbone__{n}": a for n, a in self.backbone.items()}
         arrays.update({f"head__{n}": np.asarray(a) for n, a in self.head.params.items()})
         info = {"k": self.k, "head": self.head.name, "head_config": self.head.config(), "meta": self.meta}
         np.savez(path, __info__=np.array(json.dumps(info, default=float)), **arrays)
+        return path
 
     @classmethod
     def load(cls, path: str) -> "SplitCNN":
+        """Read what ``save`` wrote; ``path`` may omit the ``.npz`` that save appended."""
+        import os
+        path = str(path)
+        if not os.path.exists(path) and os.path.exists(path + ".npz"):
+            path += ".npz"
         with np.load(path, allow_pickle=False) as f:
             info = json.loads(str(f["__info__"]))
             bb = {n.split("__", 1)[1]: f[n] for n in f.files if n.startswith("backbone__")}
@@ -327,14 +344,16 @@ class SplitCNN:
         return cls(info["k"], bb, head, info.get("meta", {}))
 
 
-def _fit_kw(kw: dict | None) -> dict:
-    return {k: v for k, v in (kw or {}).items() if k in ("epochs", "batch", "lr", "patience")}
+def _fit_kw(kw: dict | None, defaults: dict) -> dict:
+    """``defaults`` overridden by the training keywords in ``kw``."""
+    return {**defaults, **{k: v for k, v in (kw or {}).items() if k in ("epochs", "batch", "lr", "patience")}}
 
 
 def train_end_to_end(data, k: int, head="linear", *, seed: int = 0, layers: int = 2, **fit_kw) -> SplitCNN:
     """Backbone + head trained jointly from scratch (for a quantum head: autograd
     backprop through the PennyLane QNode into the backbone). With the linear head
-    this is also step 1 of transfer learning."""
+    this is also step 1 of transfer learning. Training keywords default to
+    ``BACKBONE_FIT``."""
     Xtr, ytr, Xval, yval = data[:4]
     h = make_head(head, k, layers=layers) if isinstance(head, str) else head
     rng = np.random.default_rng(seed)
@@ -343,7 +362,7 @@ def train_end_to_end(data, k: int, head="linear", *, seed: int = 0, layers: int 
     def logits_fn(p, x):
         return h.logits(p["head"], backbone(p["backbone"], x))
 
-    res = fit(params, logits_fn, Xtr, ytr, Xval, yval, seed=seed + 1, **_fit_kw(fit_kw))
+    res = fit(params, logits_fn, Xtr, ytr, Xval, yval, seed=seed + 1, **_fit_kw(fit_kw, BACKBONE_FIT))
     h.params = res.params["head"]
     meta = {"mode": "end-to-end", "seed": seed, "best_epoch": res.best_epoch, "val_acc": res.best_val_acc,
             "seconds": res.seconds, "steps": res.steps, "epochs_run": len(res.history)}
@@ -351,10 +370,11 @@ def train_end_to_end(data, k: int, head="linear", *, seed: int = 0, layers: int 
 
 
 def train_head(head, Ztr, ytr, Zval, yval, *, seed: int = 0, **fit_kw) -> FitResult:
-    """Train ``head`` on frozen embeddings; sets ``head.params`` and returns the fit."""
+    """Train ``head`` on frozen embeddings; sets ``head.params`` and returns the fit.
+    Training keywords default to ``HEAD_FIT``."""
     rng = np.random.default_rng(seed)
     res = fit(head.init(rng), head.logits, np.asarray(Ztr, np.float64), ytr, np.asarray(Zval, np.float64), yval,
-              seed=seed + 1, **_fit_kw(fit_kw))
+              seed=seed + 1, **_fit_kw(fit_kw, HEAD_FIT))
     head.params = res.params
     return res
 
@@ -378,7 +398,8 @@ class TransferResult:
 
 def train_transfer(data, k: int, heads=HEADS, *, seed: int = 0, layers: int = 2,
                    backbone_kw: dict | None = None, head_kw: dict | None = None) -> TransferResult:
-    """Transfer mode: backbone + linear head end to end, then every head on the frozen embedding."""
+    """Transfer mode: backbone + linear head end to end, then every head on the frozen embedding.
+    ``backbone_kw`` / ``head_kw`` override ``BACKBONE_FIT`` / ``HEAD_FIT`` entry by entry."""
     Xtr, ytr, Xval, yval = data[:4]
     model = train_end_to_end(data, k, "linear", seed=seed, **(backbone_kw or {}))
     Ztr, Zval = model.embed(Xtr), model.embed(Xval)

@@ -189,6 +189,19 @@ def test_save_load_roundtrip(quick, data, tmp_path):
     qb = nets.SplitCNN.load(str(tmp_path / "q.npz"))
     assert isinstance(qb.head, QuantumHead) and qb.head.layers == 2
     assert np.allclose(qb.forward_from("conv2", q.forward_to("conv2", X)), q.forward_from("input", X), atol=1e-5)
+    # np.savez appends .npz; load accepts the path as given to save
+    written = quick.model.save(str(tmp_path / "nosuffix"))
+    assert written.endswith("nosuffix.npz")
+    again = nets.SplitCNN.load(str(tmp_path / "nosuffix"))
+    assert np.array_equal(again.forward_from("input", X), quick.model.forward_from("input", X))
+
+
+def test_training_defaults_are_the_measured_settings():
+    """The reported numbers used these settings; calling the API without keywords must reproduce them."""
+    assert nets.BACKBONE_FIT == {"epochs": 60, "lr": 0.003, "batch": 32, "patience": 10}
+    assert nets.HEAD_FIT == {"epochs": 60, "lr": 0.03, "batch": 32, "patience": 10}
+    assert nets._fit_kw(None, nets.BACKBONE_FIT) == nets.BACKBONE_FIT
+    assert nets._fit_kw({"epochs": 2, "seed": 9}, nets.HEAD_FIT) == {**nets.HEAD_FIT, "epochs": 2}
 
 
 # ---- quantum head ----------------------------------------------------------------
@@ -294,6 +307,18 @@ def test_predict_packed_live_branch_in_local_mode(head4, monkeypatch):
     with pytest.raises(RuntimeError, match="refusing 2 packed jobs"):
         head4.predict_packed(cal, Z, shots=100, per_job=1)
     monkeypatch.undo()
+    # per_job larger than the chip holds: 4 of these programs fit on 27 qubits with buffer=1, so
+    # 6 samples need 2 jobs although ceil(6 / 6) = 1. The limit must count the planned jobs and
+    # refuse before any submission.
+    import qiskit_ibm_runtime as qir
+    submitted = []
+    monkeypatch.setattr(qir.SamplerV2, "run", lambda self, *a, **kw: submitted.append(1))
+    monkeypatch.setattr(executor, "HW_MAX_CIRCUITS", 1)
+    Z6 = np.random.default_rng(8).uniform(-1, 1, (6, 4))
+    with pytest.raises(RuntimeError, match="refusing 2 packed jobs"):
+        head4.predict_packed(cal, Z6, shots=100, per_job=6)
+    assert submitted == []
+    monkeypatch.undo()
     r = head4.predict_packed(cal, Z, shots=1000, per_job=2)
     assert r.n_jobs == 1 and not r.meta["jobs"][0]["emulated"] and r.meta["jobs"][0]["job_id"]
     assert np.corrcoef(r.expvals.ravel(), head4.expvals_exact(Z).ravel())[0, 1] > 0.8
@@ -311,18 +336,60 @@ def test_reid_and_r2_metrics():
 
 def test_private_ok_rule():
     base = {"chance": 1 / 360, "reid_label": 10 / 360}
-    emb = {**base, "reid": 13 / 360, "r2_beyond_label": 0.01}
+    emb = {**base, "reid": 13 / 360, "reid_beyond_label": 3 / 360, "r2_beyond_label": 0.01}
     assert L.private_ok(emb)                                    # 3 images beyond the label: <= 5 x chance
     assert not L.private_ok(emb, relative_to_label=False)       # the label alone is already 10 x chance
-    assert not L.private_ok({**emb, "reid": 0.9})
+    assert not L.private_ok({**emb, "reid": 0.9, "reid_beyond_label": 0.88})
     assert not L.private_ok({**emb, "r2_beyond_label": 0.2})
-    assert L.private_ok({**emb, "reid": 0.9}, max_reid=1.0)
-    assert "re-identify 90%" in L.privacy_reason({**emb, "reid": 0.9}, "conv1")
+    assert L.private_ok({**emb, "reid": 0.9, "reid_beyond_label": 0.88}, max_reid=1.0)
+    # Fewer hits than the label but 7 different images: the rate difference is negative,
+    # the per-image count is 7 > 5 and fails.
+    assert not L.private_ok({**emb, "reid": 8 / 360, "reid_beyond_label": 7 / 360})
+    with pytest.raises(KeyError, match="reid_beyond_label"):
+        L.private_ok({k: v for k, v in emb.items() if k != "reid_beyond_label"})
+    assert L.private_ok({k: v for k, v in emb.items() if k != "reid_beyond_label"}, relative_to_label=False,
+                        max_reid=0.05)
+    reason = L.privacy_reason({**emb, "reid": 0.9, "reid_beyond_label": 0.88}, "conv1")
+    assert "re-identify 90%" in reason and "88.0% that the label does not" in reason
+
+
+def test_reid_beyond_label_is_counted_per_image():
+    """A decoder that re-identifies exactly the set S: beyond the label is |S minus label hits|,
+    not the difference of the two rates."""
+    rng = np.random.default_rng(4)
+    n, d = 60, 64
+    proto = rng.uniform(0.2, 0.8, (10, d))                       # class structure, so the label helps
+    ytr, yval, yte = (rng.integers(0, 10, m) for m in (300, 100, n))
+    Xtr, Xval, Xte = (np.clip(proto[y] + rng.normal(0, 0.1, (len(y), d)), 0, 1) for y in (ytr, yval, yte))
+    label_hits = set(np.flatnonzero(L.reid_ranks(Xte, L.label_baseline(Xtr, ytr, yte)) == 0))
+    assert label_hits
+    S = set(sorted(label_hits)[:1]) | set(range(0, n, 4))       # one label hit plus some others
+    others = [i for i in range(n) if i not in S]
+    Hte = Xte.copy()
+    Hte[others] = Xte[np.roll(others, 1)]                         # these rows decode to another original
+    r = L.attack(Xtr, Xval, Hte, Xtr, Xval, Xte, ytr, yte, attacks=("ridge",))
+    assert r["reid"] == pytest.approx(len(S) / n)
+    assert r["reid_beyond_label"] == pytest.approx(len(S - label_hits) / n)
+    assert r["reid_with_label"] == pytest.approx(len(S | label_hits) / n)
+    assert r["reid_minus_label"] == pytest.approx((len(S) - len(label_hits)) / n)
+    assert r["reid_beyond_label"] > r["reid_minus_label"]
+
+
+def test_knn_decoder_is_tuned_on_validation_per_metric():
+    rng = np.random.default_rng(5)
+    Xtr = rng.uniform(0, 1, (200, 16))
+    Xval = np.clip(Xtr[:80] + rng.normal(0, 0.01, (80, 16)), 0, 1)   # near-duplicates: one neighbour is best
+    decs, info = L.knn_decoder(Xtr * 3.0, Xtr, Xval * 3.0, Xval)
+    assert set(decs) == set(L.METRICS) == set(info["chosen"])
+    for m, c in info["chosen"].items():
+        assert c["neighbours"] in L.KNN_NEIGHBOURS and isinstance(c["standardised"], bool)
+    # activations are (scaled) images: one neighbour returns the training image
+    assert np.allclose(decs["reid"](Xtr[:5] * 3.0), Xtr[:5]) and info["chosen"]["reid"]["neighbours"] == 1
 
 
 def test_leakage_ordering_and_label_baseline(quick, data):
     rows = {r["cut"]: r for r in L.leakage_report(quick.model, data, cuts=("input", "conv2", "embedding"),
-                                                  attacks=("ridge",))}
+                                                  attacks=("ridge", "knn"))}
     n = len(data[4])
     inp, emb = rows["input"], rows["embedding"]
     assert inp["reid"] >= 0.99 and inp["r2"] > 0.99 and not inp["private_ok"]
@@ -332,11 +399,18 @@ def test_leakage_ordering_and_label_baseline(quick, data):
     assert all(r["chance"] == 1 / n and r["r2_beyond_label"] == pytest.approx(r["r2"] - r["r2_label"])
                for r in rows.values())
     assert emb["r2_beyond_label"] < inp["r2_beyond_label"]
+    for r in rows.values():
+        assert set(r["attacks"]) == {"ridge", "knn"}
+        assert r["reid"] == max(a["reid"] for a in r["attacks"].values())
+        assert r["reid_beyond_label"] == max(a["reid_beyond_label"] for a in r["attacks"].values())
+        assert r["reid_with_label"] == pytest.approx(r["reid_label"] + r["reid_beyond_label"])
+        assert r["reid_beyond_label"] >= r["reid_minus_label"] - 1e-12
 
 
 # ---- profile -----------------------------------------------------------------------
 def _fake_leak(cut, reid, r2b, n=360):
-    return {"cut": cut, "chance": 1 / n, "reid": reid, "reid_label": 10 / n, "r2_beyond_label": r2b}
+    return {"cut": cut, "chance": 1 / n, "reid": reid, "reid_label": 10 / n,
+            "reid_beyond_label": max(0.0, reid - 10 / n), "r2_beyond_label": r2b, "attacks": {"ridge": {}}}
 
 
 def test_measured_profile_matches_schema(quick, data):
@@ -344,6 +418,8 @@ def test_measured_profile_matches_schema(quick, data):
             _fake_leak("embedding", 12 / 360, 0.01)]
     k4 = PR.summarise(quick, data[4], data[5], leak)
     k2 = copy.deepcopy(k4)
+    m2 = nets.SplitCNN(2, nets.init_backbone(2, np.random.default_rng(0)), nets.LinearHead(2))
+    k2["cut_stats"] = m2.cut_stats()
     k2["leakage"] = [_fake_leak("input", 1.0, 0.58), _fake_leak("conv1", 1.0, 0.5), _fake_leak("conv2", 0.95, 0.45),
                      _fake_leak("embedding", 0.2, 0.05)]
     prof = PR.measured_profile({4: k4, 2: k2})
@@ -357,8 +433,20 @@ def test_measured_profile_matches_schema(quick, data):
     assert e4["bytes"] == 16 and e4["private_ok"] and not prof["embedding"]["2"]["private_ok"]
     assert e4["params"] == {"linear": 50, "mlp": 70, "quantum": 74}
     assert e4["quantum_circuit"] == quick.heads["quantum"].circuit_profile()
-    best = max(("linear", "mlp"), key=lambda h: e4["accuracy"][h])
-    assert e4["back_flop"] == quick.heads[best].flop
+    val = k4["val_accuracy"]
+    assert val == {h: quick.fits[h].best_val_acc for h in nets.HEADS}
+    best = max(("linear", "mlp"), key=lambda h: (val[h], h == "linear"))
+    assert e4["classical_head"] == best and e4["classical_selected_on"] == "validation"
+    assert e4["back_flop"] == quick.heads[best].flop and e4["classical_accuracy"] == e4["accuracy"][best]
+    # the classical head is chosen on validation even when the test split would pick the other
+    k4b = copy.deepcopy(k4)
+    k4b["val_accuracy"].update(linear=0.90, mlp=0.95)
+    k4b["accuracy"].update(linear=0.97, mlp=0.93)
+    e = PR.measured_profile({4: k4b})["embedding"]["4"]
+    assert e["classical_head"] == "mlp" and e["classical_accuracy"] == 0.93 and e["back_flop"] == quick.heads["mlp"].flop
+    # conv2's back FLOPs are the dense layer plus the linear head: 148 k, kept per k
+    assert cuts["conv2"]["back_flop"] == 148 * 4 and cuts["conv2"]["back_flop_by_k"] == {"2": 296.0, "4": 592.0}
+    assert prof["privacy"]["attacks"] == ["ridge"] and "per image" in prof["privacy"]["rule"]
     assert e4["accuracy"]["quantum"] == quick.accuracy("quantum", data[4], data[5])
     bad = copy.deepcopy(prof)
     del bad["embedding"]["4"]["accuracy"]["quantum_l0"]

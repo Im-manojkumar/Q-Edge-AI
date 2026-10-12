@@ -18,7 +18,7 @@ Assumptions and choices (in the style of docs/assumptions.md):
 | Quantum head | RY(pi/2 (z+1)) encoding, L x (RZ RY RZ + CNOT ring), <Z_i>, linear k -> 10 | dressed quantum circuit (Mari et al. 2020); L = 2 unless stated |
 | MLP width | hidden units whose parameter count is closest to the quantum head's total | parameter-matched comparison; the quantum total includes k redundant angles |
 | Training | Adam, softmax cross-entropy, early stopping on validation accuracy | validation only for selection; the test split is touched once per number |
-| Attacker | honest-but-curious remote party with same-distribution labelled images (the training split) | ridge and one-hidden-layer MLP decoders; strongest per metric; "against this attack" only |
-| Privacy rule | reid beyond the label-only baseline <= 5 x chance, r2 beyond the label <= 0.10 | policy thresholds, not a standard; the absolute reid rule is reported too |
+| Attacker | honest-but-curious remote party with same-distribution labelled images (the training split) | ridge, one-hidden-layer MLP and kNN-regression decoders, hyperparameters chosen on validation; strongest per metric; "against these attacks" only |
+| Privacy rule | images re-identified that the label-only baseline does not (counted per image) <= 5 x chance, r2 beyond the label <= 0.10 | policy thresholds, not a standard; the absolute reid rule is reported too. Measured (seed 0): no cut passes at any k = 2..8, the embedding included |
 | Packed QPU cost | ``packing_cost``: catalogue QPU figures, Braket-style per-task / per-shot prices | same assumptions as E7 |
 """
