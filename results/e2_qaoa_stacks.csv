@@ -1,0 +1,5 @@
+stack,n,best_ratio,expected_ratio,circuit_evals,time_s
+qiskit,8,1.0,0.7468,33,3.1622533969998585
+pennylane,8,1.0,0.7441,33,0.39098725100029696
+cirq,8,1.0,0.7445,33,0.4716255589996763
+braket-local,8,1.0,0.7452,33,1.2760068270004012

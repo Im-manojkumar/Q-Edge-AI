@@ -145,7 +145,7 @@ class CostModel:
     @staticmethod
     def quantum_quality(w: Workload, fid: float) -> float:
         if w.kind == "optimization":
-            return qaoa_quality(w.params["n"], fid)
+            return qaoa_quality(w.params["n"], fid, w.params.get("density", 0.3), w.quantum.shots)
         if w.kind == "kernel_classification":
             return kernel_quality(fid)
         if w.kind == "quantum_simulation":

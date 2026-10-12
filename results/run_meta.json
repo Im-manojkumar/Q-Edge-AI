@@ -1,9 +1,9 @@
 {
-  "quick": true,
+  "quick": false,
   "python": "3.13.16",
   "machine": "x86_64",
   "processor": "x86_64",
-  "started": "2026-10-12 09:47:37",
+  "started": "2026-10-12 10:33:29",
   "versions": {
     "qiskit": "2.5.2",
     "qiskit_aer": "0.17.2",
@@ -12,6 +12,10 @@
     "amazon-braket-sdk": "1.127.3.post0"
   },
   "timings_s": {
-    "e4": 0.4
+    "e2": 1299.7,
+    "e1": 362.7,
+    "e3": 18.2,
+    "e4": 0.4,
+    "e5": 290.7
   }
 }

@@ -36,7 +36,7 @@ def stacks(df: pd.DataFrame, out: str):
     fig, axes = plt.subplots(1, len(fams), figsize=(3.2 * len(fams), 3.2), sharey=True)
     for ax, fam in zip(axes, fams):
         for stack, color in STACK_COLORS.items():
-            s = d[(d.family == fam) & (d.stack == stack)]
+            s = d[(d.family == fam) & (d["stack"] == stack)]
             ax.plot(s.n_qubits, s.time_s, color=color, marker="o", markersize=4, label=stack)
         ax.set_yscale("log")
         ax.set_title(fam.replace("_", " "))
@@ -47,22 +47,39 @@ def stacks(df: pd.DataFrame, out: str):
 
 
 def maxcut(df: pd.DataFrame, out: str):
+    fig, (ax, ax2) = plt.subplots(1, 2, figsize=(11, 3.8))
     order = [("exact", "exact (classical)", INK), ("simulated_annealing", "simulated annealing", AQUA),
              ("greedy", "greedy", GRAY), ("qaoa_noiseless", "QAOA p=1, noiseless", BLUE),
              ("qaoa_noisy", "QAOA p=1, NISQ noise", ORANGE), ("random_sampling", "random sampling", MAGENTA)]
     g = df.groupby(["method", "n"]).ratio.mean().reset_index()
-    fig, ax = plt.subplots(figsize=(6.4, 3.6))
     for m, label, color in order:
         s = g[g.method == m]
         ax.plot(s.n, s.ratio, marker="o", markersize=4, color=color, label=label,
                 linestyle="--" if m == "random_sampling" else "-")
     emu = df[df.method == "qaoa_ibm_emulator"]
     if len(emu):
-        ax.scatter(emu.n, emu.ratio, marker="D", s=40, color=YELLOW, edgecolor="white", zorder=5, label="QAOA on IBM-device emulator")
+        ax.scatter(emu.n, emu.ratio, marker="D", s=40, color=YELLOW, edgecolor="white", zorder=5,
+                   label="QAOA, IBM-device emulator")
+    ax.set_ylim(0.85, 1.01)
     ax.set_xlabel("graph nodes (= qubits)")
     ax.set_ylabel("best cut / optimum")
-    ax.set_title("MaxCut: QAOA vs classical (best of 1000 shots)")
-    ax.legend(fontsize=8, loc="lower left")
+    ax.text(14, 1.004, "exact, annealing and QAOA overlap at 1.0", ha="right", fontsize=8, color=MUTED)
+    ax.set_title("Best of 1000 shots: everything finds the optimum")
+    ax.legend(fontsize=7.5, loc="lower left")
+    # Mean cut of a single sample: the part QAOA actually changes.
+    ex = df[df.method == "exact"].assign(ratio=lambda d: (d.edges / 2) / d.optimum).groupby("n").ratio.mean()
+    ax2.plot(ex.index, ex.values, color=MAGENTA, linestyle="--", marker="o", markersize=4, label="random sample")
+    for m, label, color in [("qaoa_noiseless", "QAOA p=1, noiseless", BLUE), ("qaoa_noisy", "QAOA p=1, NISQ noise", ORANGE),
+                            ("qaoa_ibm_emulator", "QAOA, IBM-device emulator", YELLOW)]:
+        s = df[df.method == m].groupby("n").expected_ratio.mean()
+        if len(s):
+            ax2.plot(s.index, s.values, color=color, marker="o", markersize=4, label=label)
+    ax2.axhline(1.0, color=INK, linewidth=1)
+    ax2.text(ex.index.max(), 0.985, "exact / annealing", ha="right", va="top", fontsize=8, color=MUTED)
+    ax2.set_xlabel("graph nodes (= qubits)")
+    ax2.set_ylabel("mean cut of one sample / optimum")
+    ax2.set_title("Mean sample: QAOA's real gain over random")
+    ax2.legend(fontsize=7.5, loc="lower right")
     _save(fig, out)
 
 
@@ -79,7 +96,7 @@ def kernel(df: pd.DataFrame, out: str):
     ax.set_ylim(0.4, 1.0)
     ax.set_ylabel("test accuracy")
     ax.set_title("Breast-cancer classification: quantum vs classical kernels")
-    ax.legend(fontsize=8, ncol=2, loc="upper right")
+    ax.legend(fontsize=8, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.12))
     _save(fig, out)
 
 

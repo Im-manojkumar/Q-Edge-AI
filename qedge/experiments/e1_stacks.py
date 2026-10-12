@@ -24,6 +24,11 @@ def exact_probs(c) -> dict[str, float]:
     return {k[::-1]: v for k, v in p.items() if v > 1e-12}
 
 
+def mean_z(p: dict[str, float]) -> float:
+    """Average <Z> over qubits: an observable that 4000 shots estimate well even at 20 qubits."""
+    return sum(v * (1 - 2 * k.count("1") / len(k)) for k, v in p.items())
+
+
 def families(n: int, seed: int = 0):
     rng = np.random.default_rng(seed)
     return {
@@ -47,10 +52,11 @@ def run(quick: bool = False, shots: int = 4000) -> pd.DataFrame:
                     t0 = time.perf_counter()
                     res = be.run([c], shots)
                     times.append(time.perf_counter() - t0)
-                tv = total_variation(ref, probabilities(res.counts[0]))
+                probs = probabilities(res.counts[0])
+                tv = total_variation(ref, probs)
                 rows.append({"experiment": "noiseless", "stack": name, "family": fam, "n_qubits": n,
                              "depth": c.depth(), "n_2q": c.n_2q, "time_s": min(times), "tv_to_exact": tv,
-                             "shots": shots})
+                             "mean_z_error": abs(mean_z(probs) - mean_z(ref)), "shots": shots})
     # Noisy: identical depolarising model translated into each SDK's own noise API.
     noise = NoiseSpec(p1=1e-3, p2=1e-2)
     noisy = {s: get_backend(s, noise) for s in SIMULATOR_STACKS}

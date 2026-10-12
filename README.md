@@ -21,7 +21,7 @@ Minor project, Department of AI & Data Science (Batch 20): Manoj Kumar P, Ayaan 
 | Simulation environment | `qedge/simulation/simulator.py` | Discrete-event simulator with hidden "true" conditions and 7 scenarios. |
 | Experiments | `qedge/experiments/` | E1 stacks, E2 quantum vs classical, E3 policies, E4 decision boundaries, E5 live runs. |
 | Dashboard | `dashboard/app.py` | Streamlit: plan/run a workload, see why, run simulations, explore what-if maps, browse results. |
-| Report | `REPORT.md` | Research-style write-up of the results. |
+| Report | `REPORT.md` | Research-style write-up of the results (narrative source in `docs/narrative.md`, tables generated from `results/`). |
 
 ## Quick start
 
@@ -64,6 +64,16 @@ python -m qedge submit optimization n=6 --force cloud_cpu+qpu --qpu-stack braket
 Real-hardware runs are capped by `QEDGE_HW_MAX_CIRCUITS` (60) and `QEDGE_HW_MAX_SHOTS` (2000) so an experiment
 cannot burn a month of free minutes or a large bill. QAOA uses 8 optimiser iterations on hardware. See
 `.env.example`.
+
+## Dashboard
+
+`python -m qedge dashboard` opens five tabs: plan and run one workload (with every placement's predicted
+latency, energy, cost, quality and the quantum-gate checks), run the simulation, a what-if map for QPU
+hardware figures, the experiment results, and provider status.
+
+![Orchestrator tab](docs/dashboard_orchestrator.png)
+
+![What-if tab](docs/dashboard_whatif.png)
 
 ## How a decision is made
 

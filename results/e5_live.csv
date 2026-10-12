@@ -1,0 +1,26 @@
+tag,kind,params,placement,predicted_latency_s,predicted_quality,measured_latency_s,quality,quality_metric,method,backend,fallback_from,error,predicted_cost_usd
+orchestrator,inference,{'batch': 4},edge_gpu,0.012,1.0,0.000849971000207006,1.0,accuracy,mlp,,,,0.0
+orchestrator,inference,{'batch': 16},edge_gpu,0.03684997100020701,1.0,0.001045543000145699,1.0,accuracy,mlp,,,,0.0
+orchestrator,training,{'samples': 800},edge_gpu,1.4118739125077626,1.0,0.0945196330003455,0.8166666666666667,test accuracy,mlp-sgd,,,,0.0
+orchestrator,optimization,{'n': 6},edge_cpu,1.28e-07,1.0,4.838499990000855e-05,1.0,approximation ratio,exact enumeration,,,,0.0
+orchestrator,optimization,{'n': 10},edge_cpu,8.550463983361423e-05,1.0,0.00019140199947287329,1.0,approximation ratio,exact enumeration,,,,0.0
+orchestrator,optimization,{'n': 30},edge_cpu,0.028260587829009864,1.0,0.08635600500019791,1.0,approximation ratio,simulated annealing,,,,0.0
+orchestrator,kernel_classification,"{'features': 2, 'n_train': 30}",edge_cpu,0.005651510341301629,0.9041666666666667,0.0029152839997550473,1.0,test accuracy,RBF-SVM,,,,0.0
+orchestrator,kernel_classification,"{'features': 4, 'n_train': 30}",edge_cpu,0.009934907511829967,0.928125,0.00274035999973421,0.9,test accuracy,RBF-SVM,,,,0.0
+orchestrator,quantum_simulation,"{'n': 6, 'steps': 4}",edge_gpu,8.517660286712209e-08,1.0,0.0006401860000551096,1.0,1 - |error| in <Z>,state vector,,,,0.0
+orchestrator,quantum_simulation,"{'n': 12, 'steps': 8}",edge_gpu,0.0006451506005270247,1.0,0.021615176000523206,1.0,1 - |error| in <Z>,state vector,,,,0.0
+forced:edge_cpu,optimization,{'n': 6},edge_cpu,5.773871433207611e-06,1.0,3.422999998292653e-05,1.0,approximation ratio,exact enumeration,,,,0.0
+forced:cloud_cpu+quantum_sim,optimization,{'n': 6},cloud_cpu+quantum_sim,28.337274265728002,1.0,3.5249298999998304,1.0,approximation ratio,QAOA,qiskit-aer,,,4.6354498400000006e-05
+forced:cloud_cpu+qpu,optimization,{'n': 6},cloud_cpu+qpu,207.770054000512,1.0,88.62203834499915,1.0,approximation ratio,QAOA,ibm-emulator:FakeTorino,ibm,,61.450000104166875
+forced:edge_cpu,optimization,{'n': 10},edge_cpu,0.00028213970586668654,1.0,0.00016087799940578407,1.0,approximation ratio,exact enumeration,,,,0.0
+forced:cloud_cpu+quantum_sim,optimization,{'n': 10},cloud_cpu+quantum_sim,22.134224630201587,1.0,4.120550880999605,1.0,approximation ratio,QAOA,qiskit-aer,,,4.6367817440000006e-05
+forced:cloud_cpu+qpu,optimization,{'n': 10},cloud_cpu+qpu,178.12951409351626,1.0,180.5564844999969,1.0,approximation ratio,QAOA,ibm-emulator:FakeTorino,ibm,,61.450000104177754
+forced:edge_cpu,kernel_classification,"{'features': 2, 'n_train': 30}",edge_cpu,0.002529007999783062,0.92109375,0.0026080170000568614,0.8,test accuracy,RBF-SVM,,,,0.0
+forced:cloud_cpu+quantum_sim,kernel_classification,"{'features': 2, 'n_train': 30}",cloud_cpu+quantum_sim,2.126607612066818,0.8083333333333333,1.9806784220015952,1.0,test accuracy,quantum-kernel SVM,qiskit-aer,,,0.0004594798356666666
+forced:edge_cpu,kernel_classification,"{'features': 4, 'n_train': 30}",edge_cpu,0.005097520499703023,0.8908203125,0.0036989589998484007,1.0,test accuracy,RBF-SVM,,,,0.0
+forced:cloud_cpu+quantum_sim,kernel_classification,"{'features': 4, 'n_train': 30}",cloud_cpu+quantum_sim,2.090283531419723,0.85625,2.935647176999267,0.9,test accuracy,quantum-kernel SVM,qiskit-aer,,,0.0004594825038666667
+forced:edge_cpu,quantum_simulation,"{'n': 6, 'steps': 4}",edge_cpu,7.640728924842095e-05,1.0,0.0009010010007841629,1.0,1 - |error| in <Z>,state vector,,,,0.0
+forced:cloud_cpu+quantum_sim,quantum_simulation,"{'n': 6, 'steps': 4}",cloud_cpu+quantum_sim,2.0674558526073543,1.0,0.16224333499974133,0.9912222757630675,1 - |error| in <Z>,Trotter circuit,qiskit-aer,,,2.5007016408888892e-05
+forced:cloud_cpu+qpu,quantum_simulation,"{'n': 6, 'steps': 4}",cloud_cpu+qpu,110.20229275074105,0.804074567957301,3.52061240399996,0.9518056090964009,1 - |error| in <Z>,Trotter circuit,ibm-emulator:FakeTorino,ibm,,29.300000006946007
+forced:edge_cpu,quantum_simulation,"{'n': 12, 'steps': 8}",edge_cpu,0.03041030678731941,1.0,0.026121125999452488,1.0,1 - |error| in <Z>,state vector,,,,0.0
+forced:cloud_cpu+quantum_sim,quantum_simulation,"{'n': 12, 'steps': 8}",cloud_cpu+quantum_sim,1.5911610238912532,0.9978055689407669,0.2601855589995216,0.993649566275261,1 - |error| in <Z>,Trotter circuit,qiskit-aer,,,2.5026204746666667e-05

@@ -74,9 +74,15 @@ class Workload:
 # results/calibration.json when that file exists.
 # ---------------------------------------------------------------------------
 CALIBRATION = {
-    "qaoa_ratio": {"slope": -0.012, "at": 8, "value": 0.97, "floor": 0.70},
-    "random_ratio": {"slope": -0.015, "at": 8, "value": 0.93, "floor": 0.60},
-    "sa_ratio": {"slope": -0.0008, "at": 8, "value": 1.0, "floor": 0.95},
+    # QAOA(p=1) sample mean, as the fraction of the gap between random sampling and the optimum
+    # it closes: gain(n) = a * n^-b (fitted in E2). The best of S shots is then modelled from
+    # that mean with an extreme-value estimate (see best_of_shots).
+    "qaoa_gain": {"a": 1.3, "b": 0.9},
+    # MaxCut optimum on G(n, density): opt / |E| ~ 0.5 + opt_c / sqrt(n * density) (fitted in E2)
+    "opt_c": 0.55,
+    # Set only by what-if experiments: assumed noiseless QAOA best-cut ratio.
+    "qaoa_override": None,
+    "sa_ratio": {"slope": 0.0, "at": 8, "value": 1.0, "floor": 0.95},
     "kernel_acc": {"quantum": 0.86, "rbf": 0.90},
     "mps_chi_max": 1024,
     "entanglement_bits_per_step": 0.5,
@@ -97,10 +103,37 @@ def _lin(c: dict, n: int) -> float:
     return float(np.clip(c["value"] + c["slope"] * (n - c["at"]), c["floor"], 1.0))
 
 
-def qaoa_quality(n: int, fidelity: float = 1.0) -> float:
-    """Best-sampled approximation ratio, degraded toward random sampling by noise."""
-    q, r = _lin(CALIBRATION["qaoa_ratio"], n), _lin(CALIBRATION["random_ratio"], n)
-    return fidelity * q + (1 - fidelity) * r
+def maxcut_opt_per_edge(n: int, density: float) -> float:
+    return min(1.0, 0.5 + CALIBRATION["opt_c"] / math.sqrt(max(n * density, 1e-9)))
+
+
+def best_of_shots(mean_ratio: float, n_edges: int, opt: float, shots: int) -> float:
+    """Expected best cut ratio among `shots` samples whose cut has the given mean.
+
+    A sample's cut is a sum over |E| edges, so its spread is about sqrt(|E|)/2; the
+    maximum of S roughly independent draws sits ~sqrt(2 ln S) spreads above the mean.
+    For small graphs this reaches the optimum (what E2 measures, for QAOA *and* for random
+    sampling); for large graphs it does not, which is why the mean matters there."""
+    sigma = math.sqrt(n_edges) / 2 / opt
+    return float(min(1.0, mean_ratio + sigma * math.sqrt(2 * math.log(max(shots, 2)))))
+
+
+def qaoa_quality(n: int, fidelity: float = 1.0, density: float = 0.3, shots: int = 1000) -> float:
+    """Best sampled cut / optimum for QAOA on a noisy device: noise mixes QAOA's output
+    distribution toward uniform random sampling in proportion to (1 - fidelity)."""
+    n_edges = max(1, int(density * n * (n - 1) / 2))
+    opt = n_edges * maxcut_opt_per_edge(n, density)
+    random_mean = (n_edges / 2) / opt
+    override = CALIBRATION.get("qaoa_override")
+    if override is not None:
+        # What-if for a hard instance class: assumed noiseless quality, degraded by noise toward
+        # 0.5 (a random assignment cuts half the edges; the conservative floor on such instances).
+        return fidelity * override + (1 - fidelity) * 0.5
+    g = CALIBRATION["qaoa_gain"]
+    gain = min(1.0, g["a"] * n ** (-g["b"]))
+    qaoa_mean = random_mean + gain * (1 - random_mean)
+    mean = fidelity * qaoa_mean + (1 - fidelity) * random_mean
+    return best_of_shots(mean, n_edges, opt, shots)
 
 
 def sa_quality(n: int) -> float:

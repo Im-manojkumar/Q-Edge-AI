@@ -125,21 +125,25 @@ def tfim(quick: bool) -> pd.DataFrame:
 
 
 def fit_calibration(mc: pd.DataFrame, kn: pd.DataFrame) -> dict:
-    def line(method):
-        d = mc[mc.method == method].groupby("n").ratio.mean()
-        slope, icpt = np.polyfit(d.index.values, d.values, 1)
-        at = 8
-        return {"slope": float(min(slope, 0.0)), "at": at, "value": float(min(1.0, icpt + slope * at)),
-                "floor": float(max(0.5, d.min() - 0.15))}
+    exact = mc[mc.method == "exact"]
+    # opt/|E| = 0.5 + c / sqrt(n * density); E2 graphs use density 0.5
+    c = float((((exact.optimum / exact.edges) - 0.5) * np.sqrt(exact.n * 0.5)).mean())
+    sa = mc[mc.method == "simulated_annealing"].groupby("n").ratio.mean()
     acc = kn.groupby("method").accuracy.mean()
-    return {"qaoa_ratio": line("qaoa_noiseless"), "random_ratio": line("random_sampling"),
-            "sa_ratio": line("simulated_annealing"),
+    q = mc[mc.method == "qaoa_noiseless"]
+    rm = (q.edges / 2) / q.optimum
+    gain = ((q.expected_ratio - rm) / (1 - rm)).groupby(q.n).mean().clip(lower=1e-3)
+    b, log_a = np.polyfit(np.log(gain.index.values), np.log(gain.values), 1)
+    return {"qaoa_gain": {"a": float(np.exp(log_a)), "b": float(-b)},
+            "opt_c": c,
+            "sa_ratio": {"slope": 0.0, "at": 8, "value": float(sa.mean()), "floor": 0.95},
             "kernel_acc": {"quantum": float(acc["quantum_kernel_noiseless"]), "rbf": float(acc["rbf_svm"])}}
 
 
 def run(quick: bool = False, out_dir: str = "results") -> dict[str, pd.DataFrame]:
     mc = maxcut(quick)
     kn = kernels(quick)
+    mc.to_csv(f"{out_dir}/e2_maxcut.csv", index=False)
     tf = tfim(quick)
     st = qaoa_all_stacks(6 if quick else 8)
     cal = fit_calibration(mc, kn)

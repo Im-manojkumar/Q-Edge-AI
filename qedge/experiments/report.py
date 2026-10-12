@@ -12,6 +12,9 @@ def _r(path):
     return pd.read_csv(p) if os.path.exists(p) else None
 
 
+INT_COLS = {"n", "n_qubits", "features", "steps", "tasks"}
+
+
 def _md(df: pd.DataFrame, floatfmt: str = ".3f") -> str:
     cols = list(df.columns)
     out = ["| " + " | ".join(cols) + " |", "|" + "|".join("---" for _ in cols) + "|"]
@@ -19,7 +22,9 @@ def _md(df: pd.DataFrame, floatfmt: str = ".3f") -> str:
         cells = []
         for c in cols:
             v = row[c]
-            if isinstance(v, float):
+            if isinstance(v, float) and c in INT_COLS and not pd.isna(v) and float(v).is_integer():
+                cells.append(str(int(v)))
+            elif isinstance(v, float):
                 cells.append("-" if pd.isna(v) else format(v, floatfmt))
             else:
                 cells.append(str(v))
@@ -40,12 +45,16 @@ def build(path: str = "REPORT.md", narrative: str = "docs/narrative.md"):
     e1 = _r("e1_stacks.csv")
     if e1 is not None:
         nl = e1[e1.experiment == "noiseless"]
-        t = (nl.groupby(["stack"]).agg(max_tv_to_exact=("tv_to_exact", "max"), mean_tv=("tv_to_exact", "mean"))
-             .reset_index())
+        small = nl[nl.n_qubits <= 8]
+        t = (small.groupby(["stack"]).agg(mean_tv_to_exact_n_le_8=("tv_to_exact", "mean"),
+                                          max_tv_to_exact_n_le_8=("tv_to_exact", "max")).reset_index())
+        if "mean_z_error" in nl:
+            t = t.merge(nl.groupby("stack").agg(max_mean_z_error_all_n=("mean_z_error", "max")).reset_index())
         big = nl[nl.n_qubits == nl.n_qubits.max()].pivot_table(index="family", columns="stack", values="time_s").reset_index()
         parts.append("## A1. Stack agreement and speed (E1)\n")
-        parts.append("Total-variation distance between each stack's sampled distribution and the exact one "
-                     "(4000 shots; shot noise alone gives roughly 0.01 to 0.1 depending on how spread the distribution is):\n")
+        parts.append("Agreement with the exact state vector (4000 shots). Total-variation distance is only meaningful "
+                     "while 4000 shots can cover the outcomes (up to 8 qubits); the average-<Z> error is checked at "
+                     "every size up to 20 qubits:\n")
         parts.append(_md(t))
         parts.append(f"\nWall time (s) per run at {int(nl.n_qubits.max())} qubits:\n")
         parts.append(_md(big))
@@ -62,6 +71,11 @@ def build(path: str = "REPORT.md", narrative: str = "docs/narrative.md"):
         t = mc.pivot_table(index="n", columns="method", values="ratio").reset_index()
         parts.append("Mean best-cut / optimum:\n")
         parts.append(_md(t))
+        ex = mc[mc.method.str.startswith("qaoa")].pivot_table(index="n", columns="method", values="expected_ratio")
+        rnd = mc[mc.method == "exact"].assign(r=lambda d: (d.edges / 2) / d.optimum).groupby("n").r.mean()
+        ex.insert(0, "random_sample", rnd)
+        parts.append("\nMean cut of a single sample / optimum (what QAOA changes; best-of-shots hides it):\n")
+        parts.append(_md(ex.reset_index()))
         tt = mc.pivot_table(index="n", columns="method", values="time_s").reset_index()
         parts.append("\nMean wall time (s):\n")
         parts.append(_md(tt, ".4f"))

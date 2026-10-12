@@ -36,7 +36,10 @@ def main(quick: bool = False, only: list[str] | None = None, out_dir: str = "res
                             "amazon-braket-sdk": bk.__version__}
     except Exception:
         pass
+    meta_path = os.path.join(out_dir, "run_meta.json")
     timings = {}
+    if only and os.path.exists(meta_path):  # partial rerun: keep timings of the steps not rerun
+        timings = json.load(open(meta_path)).get("timings_s", {})
     for name, fn in steps.items():
         if only and name not in only:
             continue
@@ -46,7 +49,7 @@ def main(quick: bool = False, only: list[str] | None = None, out_dir: str = "res
         timings[name] = round(time.time() - t0, 1)
         print(f"[qedge] {name} done in {timings[name]}s", flush=True)
     meta["timings_s"] = timings
-    with open(os.path.join(out_dir, "run_meta.json"), "w") as f:
+    with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     figures.make_all(out_dir, fig_dir)
 

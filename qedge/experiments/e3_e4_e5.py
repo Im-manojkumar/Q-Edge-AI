@@ -77,8 +77,7 @@ def e4() -> dict[str, pd.DataFrame]:
                 w = make_optimization(0, np.random.default_rng(0), n=n, deadline_s=600)
                 w.classical_quality = HARD_CLASSICAL
                 # hypothetical: noiseless QAOA beats the classical heuristic by `adv`
-                W.CALIBRATION["qaoa_ratio"] = {"slope": 0.0, "at": n, "value": min(1.0, HARD_CLASSICAL + adv),
-                                               "floor": 0.0}
+                W.CALIBRATION["qaoa_override"] = min(1.0, HARD_CLASSICAL + adv)
                 d = pol.decide(w, ResourceState())
                 qpu = next(e for e in d.estimates if e.placement.label == "cloud_cpu+qpu")
                 rows.append({"workload": "optimization", "n": n, "quality_advantage": round(adv, 3),

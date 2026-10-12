@@ -120,25 +120,25 @@ optimization,30,0.18,4.0,24.58000010525,0.9472889805467105,cloud_cpu+quantum_sim
 optimization,60,0.18,4.0,24.58000010859167,0.7010291138820637,edge_cpu,False,classical
 optimization,100,0.18,4.0,24.58000011654167,0.21931556577458855,edge_cpu,False,classical
 optimization,30,0.2,0.0,1.0525e-07,0.9472889805467105,cloud_cpu+quantum_sim,False,quantum simulator
-optimization,60,0.2,0.0,1.0859166666666667e-07,0.7010291138820637,cloud_cpu+qpu,True,QPU
+optimization,60,0.2,0.0,1.0859166666666667e-07,0.7010291138820637,edge_cpu,False,classical
 optimization,100,0.2,0.0,1.1654166666666668e-07,0.21931556577458855,edge_cpu,False,classical
 optimization,30,0.2,0.25,1.5362501052500002,0.9472889805467105,cloud_cpu+quantum_sim,False,quantum simulator
-optimization,60,0.2,0.25,1.5362501085916669,0.7010291138820637,cloud_cpu+qpu,True,QPU
+optimization,60,0.2,0.25,1.5362501085916669,0.7010291138820637,edge_cpu,False,classical
 optimization,100,0.2,0.25,1.5362501165416669,0.21931556577458855,edge_cpu,False,classical
 optimization,30,0.2,1.0,6.14500010525,0.9472889805467105,cloud_cpu+quantum_sim,False,quantum simulator
-optimization,60,0.2,1.0,6.145000108591667,0.7010291138820637,cloud_cpu+qpu,True,QPU
+optimization,60,0.2,1.0,6.145000108591667,0.7010291138820637,edge_cpu,False,classical
 optimization,100,0.2,1.0,6.1450001165416674,0.21931556577458855,edge_cpu,False,classical
 optimization,30,0.2,4.0,24.58000010525,0.9472889805467105,cloud_cpu+quantum_sim,False,quantum simulator
 optimization,60,0.2,4.0,24.58000010859167,0.7010291138820637,edge_cpu,False,classical
 optimization,100,0.2,4.0,24.58000011654167,0.21931556577458855,edge_cpu,False,classical
 optimization,30,0.22,0.0,1.0525e-07,0.9472889805467105,cloud_cpu+quantum_sim,False,quantum simulator
-optimization,60,0.22,0.0,1.0859166666666667e-07,0.7010291138820637,cloud_cpu+qpu,True,QPU
+optimization,60,0.22,0.0,1.0859166666666667e-07,0.7010291138820637,edge_cpu,False,classical
 optimization,100,0.22,0.0,1.1654166666666668e-07,0.21931556577458855,edge_cpu,False,classical
 optimization,30,0.22,0.25,1.5362501052500002,0.9472889805467105,cloud_cpu+quantum_sim,False,quantum simulator
-optimization,60,0.22,0.25,1.5362501085916669,0.7010291138820637,cloud_cpu+qpu,True,QPU
+optimization,60,0.22,0.25,1.5362501085916669,0.7010291138820637,edge_cpu,False,classical
 optimization,100,0.22,0.25,1.5362501165416669,0.21931556577458855,edge_cpu,False,classical
 optimization,30,0.22,1.0,6.14500010525,0.9472889805467105,cloud_cpu+quantum_sim,False,quantum simulator
-optimization,60,0.22,1.0,6.145000108591667,0.7010291138820637,cloud_cpu+qpu,True,QPU
+optimization,60,0.22,1.0,6.145000108591667,0.7010291138820637,edge_cpu,False,classical
 optimization,100,0.22,1.0,6.1450001165416674,0.21931556577458855,edge_cpu,False,classical
 optimization,30,0.22,4.0,24.58000010525,0.9472889805467105,cloud_cpu+quantum_sim,False,quantum simulator
 optimization,60,0.22,4.0,24.58000010859167,0.7010291138820637,edge_cpu,False,classical
