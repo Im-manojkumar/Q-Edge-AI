@@ -1,4 +1,4 @@
-"""E8: the split hybrid model, measured: heads, leakage, the quantum head on devices, the router.
+"""E9: the split hybrid model, measured: heads, leakage, the quantum head on devices, the router.
 
 Idea 3 cuts a small CNN between the edge and a remote resource and offers a
 k-qubit quantum head on the k-number embedding (``qedge.ml``, ``orchestrator/
@@ -55,11 +55,11 @@ router's profile and the report need, over seeds, and checks the cost model:
     stem split would beat the edge-only choice in 204 of the 2880 rows (camera, sensor or
     edge CPU; ``best_split_any_score``) but is ruled out because no attack was run on the
     camera's stem, so it counts as not private. So the zero says nothing about
-    whether splitting pays for a model with a small early activation; ``tests/test_e8.py``
+    whether splitting pays for a model with a small early activation; ``tests/test_e9.py``
     gives the router such a cut (a what-if, not a measured model) and it is chosen.
 
-Quick runs (``--quick``) write every E8 output with a ``.quick`` suffix
-(``results/e8_*.quick.csv``, ``split_profile.quick.json``, ``figures/e8_*.quick.png``;
+Quick runs (``--quick``) write every E9 output with a ``.quick`` suffix
+(``results/e9_*.quick.csv``, ``split_profile.quick.json``, ``figures/e9_*.quick.png``;
 gitignored), so they never overwrite or mix with the full run's results.
 
 Choices and assumptions (labelled; the module docstrings of ``qedge.ml`` hold the rest):
@@ -84,7 +84,7 @@ Choices and assumptions (labelled; the module docstrings of ``qedge.ml`` hold th
 * Provenance of the committed results: k=7 was added after the first full run, and parts
   (a), (b), (d) and (e) were run again with it. Every row for the other k came out
   identical apart from the training times, which are from the second run. Part (c)
-  (``e8_device.csv``) is from the first run: it uses only the seed-0 heads at k = 4 and 8,
+  (``e9_device.csv``) is from the first run: it uses only the seed-0 heads at k = 4 and 8,
   whose head, shot and leakage rows the second run reproduced exactly.
 * Modelled device quality: ``modelled_quality`` uses the cost model's fidelity (the head
   circuit after ``split.ROUTING_2Q``, best region of the best snapshot device);
@@ -119,7 +119,7 @@ import numpy as np
 import pandas as pd
 
 SEEDS = (0, 1, 2)
-KS = (2, 3, 4, 5, 6, 7, 8)       # = split.K_RANGE (tests/test_e8.py checks)
+KS = (2, 3, 4, 5, 6, 7, 8)       # = split.K_RANGE (tests/test_e9.py checks)
 E2E_KS = (4, 8)
 HEADS = ("linear", "mlp", "quantum", "quantum_l0")
 SHOTS = (100, 1000)
@@ -257,7 +257,7 @@ def transfer_job(seed: int, ks=KS, fit: dict | None = None, recon: bool = True, 
             keep[k] = {"backbone": tr.model.backbone, "quantum": q.params, "layers": q.layers}
         if recon and seed == RECON_SEED and k == RECON_K:
             recon_rows = reconstruction_examples(tr.model, data, rows, seed=seed)
-        print(f"[e8] transfer seed={seed} k={k}: " + " ".join(f"{r['head']} {r['test_acc']:.3f}" for r in heads[-4:])
+        print(f"[e9] transfer seed={seed} k={k}: " + " ".join(f"{r['head']} {r['test_acc']:.3f}" for r in heads[-4:])
               + f" ({time.perf_counter() - t0:.0f}s)", flush=True)
     return {"heads": heads, "shots": shots, "leakage": leak, "per_k": per_k, "models": keep, "recon": recon_rows}
 
@@ -278,7 +278,7 @@ def e2e_job(seed: int, ks=E2E_KS, heads=HEADS, fit: dict | None = None) -> dict:
                          "hidden": m.head.config().get("hidden"), "train_s": float(m.meta["seconds"]),
                          "epochs_run": int(m.meta["epochs_run"]), "best_epoch": int(m.meta["best_epoch"]),
                          "backbone_train_s": float("nan"), "backbone_val_acc": float("nan")})
-            print(f"[e8] end-to-end seed={seed} k={k} {h}: {rows[-1]['test_acc']:.3f} ({m.meta['seconds']:.0f}s)",
+            print(f"[e9] end-to-end seed={seed} k={k} {h}: {rows[-1]['test_acc']:.3f} ({m.meta['seconds']:.0f}s)",
                   flush=True)
     return {"heads": rows}
 
@@ -383,7 +383,7 @@ def build_profile(per_seed: dict[int, dict]) -> dict:
     from ..orchestrator import split
     combined = combine_seeds(per_seed)
     seeds = sorted(per_seed)
-    prof = PR.measured_profile(combined, source=f"measured (E8): test accuracy mean over seeds "
+    prof = PR.measured_profile(combined, source=f"measured (E9): test accuracy mean over seeds "
                                                 f"{', '.join(map(str, seeds))}; leakage worst case over seeds")
     for k, e in prof["embedding"].items():
         e["accuracy_std"] = combined[int(k)]["accuracy_std"]
@@ -443,7 +443,7 @@ def device_runs(models: dict, n: int | None = None, per_job=PER_JOB, shots: int 
             rows.append({**base, "path": path, "accuracy": float(np.mean(pred == yte)),
                          "agreement_with_exact": float(np.mean(pred == exact)),
                          "mean_abs_err_expz": float(np.abs(E - ez).mean()) if E is not None else 0.0, **kw})
-            print(f"[e8] device k={k} {path}: accuracy {rows[-1]['accuracy']:.3f}", flush=True)
+            print(f"[e9] device k={k} {path}: accuracy {rows[-1]['accuracy']:.3f}", flush=True)
 
         row("exact", exact, ez, shots=0)
         for s in SHOTS:
@@ -467,7 +467,7 @@ def device_runs(models: dict, n: int | None = None, per_job=PER_JOB, shots: int 
                 # bound by the same capacity: the same jobs again. Said in the row instead of run.
                 rows[-1]["note"] = (f"at most {fill[1]} samples fit in one job on {rows[-1]['device']}, so "
                                     f"per_job {pj} would give the same jobs; not run")
-                print(f"[e8] device k={k} packed {pj} per job: skipped ({rows[-1]['note']})", flush=True)
+                print(f"[e9] device k={k} packed {pj} per job: skipped ({rows[-1]['note']})", flush=True)
                 continue
             t0 = time.perf_counter()
             r = q.predict_packed(be, Z, shots=shots, per_job=pj)
@@ -646,7 +646,7 @@ def summarise_router(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---- run --------------------------------------------------------------------------------
 def result_name(name: str, quick: bool) -> str:
-    """File stem of an E8 output: quick runs get ``.quick`` so they never replace the full run's."""
+    """File stem of an E9 output: quick runs get ``.quick`` so they never replace the full run's."""
     return name + (QUICK_SUFFIX if quick else "")
 
 
@@ -670,7 +670,7 @@ def run(quick: bool = False, out_dir: str = "results", workers: int | None = Non
     jobs += [(e2e_job, {"seed": s, "ks": e2e_ks, "heads": e2e_heads, "fit": fit}) for s in seeds]
     out = _run_jobs(jobs, workers)
     tr, e2e = out[:len(seeds)], out[len(seeds):]
-    print(f"[e8] training and leakage done in {time.perf_counter() - t0:.0f}s", flush=True)
+    print(f"[e9] training and leakage done in {time.perf_counter() - t0:.0f}s", flush=True)
 
     heads = pd.DataFrame([r for o in tr + e2e for r in o["heads"]])
     leak = pd.DataFrame([r for o in tr for r in o["leakage"]])
@@ -682,7 +682,7 @@ def run(quick: bool = False, out_dir: str = "results", workers: int | None = Non
     path = profile_path(out_dir, quick)
     with open(path, "w") as f:
         json.dump(prof, f, indent=1)
-    print(f"[e8] profile written to {path}", flush=True)
+    print(f"[e9] profile written to {path}", flush=True)
 
     t1 = time.perf_counter()
     saved = copy.deepcopy(split.PROFILES)
@@ -690,18 +690,18 @@ def run(quick: bool = False, out_dir: str = "results", workers: int | None = Non
         split.load_profiles(path)
         device = device_runs(models, n=QUICK["device_n"] if quick else None,
                              per_job=QUICK["per_job"] if quick else PER_JOB)
-        print(f"[e8] device runs done in {time.perf_counter() - t1:.0f}s", flush=True)
+        print(f"[e9] device runs done in {time.perf_counter() - t1:.0f}s", flush=True)
         router = router_sweep()
     finally:
         split.PROFILES.clear()
         split.PROFILES.update(saved)
-    print(f"[e8] done in {time.perf_counter() - t0:.0f}s", flush=True)
-    frames = {"e8_heads": heads, "e8_heads_summary": summarise_heads(heads),
-              "e8_heads_paired": paired_differences(heads), "e8_shots": pd.DataFrame([r for o in tr for r in o["shots"]]),
-              "e8_leakage": leak, "e8_leakage_summary": summarise_leakage(leak),
-              "e8_reconstructions": pd.DataFrame(next(o["recon"] for s, o in zip(seeds, tr) if s == RECON_SEED)),
-              "e8_device": device, "e8_router": router, "e8_router_summary": summarise_router(router)}
-    # Quick results are saved as e8_*.quick.csv: never over the full run's CSVs.
+    print(f"[e9] done in {time.perf_counter() - t0:.0f}s", flush=True)
+    frames = {"e9_heads": heads, "e9_heads_summary": summarise_heads(heads),
+              "e9_heads_paired": paired_differences(heads), "e9_shots": pd.DataFrame([r for o in tr for r in o["shots"]]),
+              "e9_leakage": leak, "e9_leakage_summary": summarise_leakage(leak),
+              "e9_reconstructions": pd.DataFrame(next(o["recon"] for s, o in zip(seeds, tr) if s == RECON_SEED)),
+              "e9_device": device, "e9_router": router, "e9_router_summary": summarise_router(router)}
+    # Quick results are saved as e9_*.quick.csv: never over the full run's CSVs.
     return {result_name(n, quick): df for n, df in frames.items()}
 
 
@@ -980,21 +980,21 @@ def device_figure(dev: pd.DataFrame, out: str):
 
 
 def make_figures(res_dir: str = "results", fig_dir: str = "figures", quick: bool = False):
-    """Figures from the full run's CSVs, or (``quick``) from the quick run's, as e8_*.quick.png."""
+    """Figures from the full run's CSVs, or (``quick``) from the quick run's, as e9_*.quick.png."""
     p = lambda name: os.path.join(res_dir, result_name(name, quick) + ".csv")          # noqa: E731
     png = lambda name: os.path.join(fig_dir, result_name(name, quick) + ".png")       # noqa: E731
-    if not os.path.exists(p("e8_heads_summary")):
+    if not os.path.exists(p("e9_heads_summary")):
         return
     os.makedirs(fig_dir, exist_ok=True)
-    heads_figure(pd.read_csv(p("e8_heads_summary")), pd.read_csv(p("e8_heads_paired")), png("e8_heads"))
-    if os.path.exists(p("e8_leakage_summary")):
-        leakage_figure(pd.read_csv(p("e8_leakage_summary")), png("e8_leakage"))
-    if os.path.exists(p("e8_reconstructions")):
-        reconstructions_figure(pd.read_csv(p("e8_reconstructions")), png("e8_reconstructions"))
-    if os.path.exists(p("e8_router")):
-        split_map_figure(pd.read_csv(p("e8_router")), png("e8_split_map"))
-    if os.path.exists(p("e8_device")):
-        device_figure(pd.read_csv(p("e8_device")), png("e8_device"))
+    heads_figure(pd.read_csv(p("e9_heads_summary")), pd.read_csv(p("e9_heads_paired")), png("e9_heads"))
+    if os.path.exists(p("e9_leakage_summary")):
+        leakage_figure(pd.read_csv(p("e9_leakage_summary")), png("e9_leakage"))
+    if os.path.exists(p("e9_reconstructions")):
+        reconstructions_figure(pd.read_csv(p("e9_reconstructions")), png("e9_reconstructions"))
+    if os.path.exists(p("e9_router")):
+        split_map_figure(pd.read_csv(p("e9_router")), png("e9_split_map"))
+    if os.path.exists(p("e9_device")):
+        device_figure(pd.read_csv(p("e9_device")), png("e9_device"))
 
 
 if __name__ == "__main__":
@@ -1003,6 +1003,6 @@ if __name__ == "__main__":
     ap.add_argument("--quick", action="store_true")
     a = ap.parse_args()
     os.makedirs("results", exist_ok=True)
-    for name, frame in run(a.quick).items():         # quick: e8_*.quick.csv (see result_name)
+    for name, frame in run(a.quick).items():         # quick: e9_*.quick.csv (see result_name)
         frame.to_csv(os.path.join("results", f"{name}.csv"), index=False)
     make_figures(quick=a.quick)

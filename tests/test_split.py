@@ -31,6 +31,13 @@ def hand_profile(name="t_digits", acc=None) -> dict:
     return p
 
 
+@pytest.fixture(autouse=True)
+def builtin_profiles(monkeypatch):
+    """Every test here starts from the built-in profiles, whatever an earlier Orchestrator() loaded
+    from results/split_profile.json."""
+    monkeypatch.setattr(split, "PROFILES", split._defaults())
+
+
 @pytest.fixture
 def profiles(monkeypatch):
     """Register "t_digits" and "t_camera" (camera inherits t_digits' embedding verdicts)."""
@@ -393,13 +400,13 @@ def test_builtin_profiles_match_the_schema():
 
 def test_load_profiles_merges_measured_over_defaults(tmp_path, restore_profiles):
     measured = hand_profile(name="digits")
-    measured["source"] = "measured (E8)"
+    measured["source"] = "measured (E9)"
     measured["embedding"] = {"4": measured["embedding"]["4"]}            # only k = 4 was measured
     path = tmp_path / "split_profile.json"
     path.write_text(json.dumps(measured))
     profs = split.load_profiles(str(path))
     d = profs["digits"]
-    assert d["source"] == "measured (E8)" and d["cuts"][1]["reid"] == 0.97
+    assert d["source"] == "measured (E9)" and d["cuts"][1]["reid"] == 0.97
     assert d["embedding"]["4"]["private_ok"] and d["embedding"]["4"]["accuracy"]["mlp"] == 0.91
     assert d["embedding"]["2"]["source"] == split.PLACEHOLDER_NOTE and not d["embedding"]["2"]["private_ok"]
     assert profs["camera"]["embedding"]["4"]["private_ok"]                # camera inherits the measurement

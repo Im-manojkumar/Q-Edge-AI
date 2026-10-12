@@ -55,7 +55,7 @@ tabs = st.tabs(["Orchestrator", "Split model", "Simulation", "What-if map", "Exp
 
 
 def load_split_profiles() -> str | None:
-    """Reload results/split_profile.json (E8) so a new measurement shows without a restart."""
+    """Reload results/split_profile.json (E9) so a new measurement shows without a restart."""
     try:
         split.load_profiles(keep=True)
     except ValueError as e:
@@ -234,7 +234,7 @@ with tabs[1]:
                    "placeholders and are left out of the chart.")
     st.caption("quantum_l0 is the ablation with no trainable circuit (encoding + linear readout only). "
                + ("Accuracies are inherited from digits, not measured on this model." if prof["name"] == "camera"
-                  else "" if measured else "These are placeholders, not measurements, until E8 writes "
+                  else "" if measured else "These are placeholders, not measurements, until E9 writes "
                                            "results/split_profile.json."))
     st.markdown("**What an attacker recovers from each transmitted tensor**")
     leak = pd.DataFrame(cut_rows + [{"cut": f"embedding (k={r['k']})", "values": r["k"], "bytes": r["bytes"],
@@ -309,15 +309,15 @@ with tabs[1]:
 
     st.divider()
     import glob
-    e8 = sorted(glob.glob(os.path.join("figures", "e8_*.png")))
-    st.markdown("**Experiment E8 figures**")
-    if e8:
-        for f in e8:
+    e9 = sorted(glob.glob(os.path.join("figures", "e9_*.png")))
+    st.markdown("**Experiment E9 figures**")
+    if e9:
+        for f in e9:
             st.markdown(f"`{os.path.basename(f)}`")
             st.image(f)
     else:
-        st.caption("No E8 figures yet. Experiment E8 writes them (figures/e8_*.png) with "
-                   "`python -m qedge experiments --only e8` once E8 is part of run_all; until then that "
+        st.caption("No E9 figures yet. Experiment E9 writes them (figures/e9_*.png) with "
+                   "`python -m qedge experiments --only e9` once E9 is part of run_all; until then that "
                    "command stops with \"unknown experiment step\".")
 
 # ---------------------------------------------------------------- simulation

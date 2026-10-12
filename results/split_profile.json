@@ -1,7 +1,7 @@
 {
  "name": "digits",
  "label": "digits: 8x8 CNN backbone, k-dim embedding, classical or quantum head",
- "source": "measured (E8): test accuracy mean over seeds 0, 1, 2; leakage worst case over seeds",
+ "source": "measured (E9): test accuracy mean over seeds 0, 1, 2; leakage worst case over seeds",
  "classes": 10,
  "input_bytes": 256,
  "cuts": [

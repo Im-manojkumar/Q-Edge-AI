@@ -54,9 +54,9 @@ def main(argv=None):
     k.add_argument("--buffer", type=int, default=1, choices=[0, 1], help="1 leaves a free qubit ring around each program")
     k.add_argument("--shots", type=int, default=4000)
 
-    e = sub.add_parser("experiments", help="run E1-E8 and regenerate figures")
+    e = sub.add_parser("experiments", help="run E1-E9 and regenerate figures")
     e.add_argument("--quick", action="store_true")
-    e.add_argument("--only", nargs="*", choices=["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8"])
+    e.add_argument("--only", nargs="*", choices=["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e9"])
     e.add_argument("--qpu-stack", default="ibm-auto")
 
     c = sub.add_parser("calibration", help="calibration-aware routing: devices, qubit choice, live logging, drift")

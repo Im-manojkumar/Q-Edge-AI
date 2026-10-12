@@ -1,7 +1,7 @@
 """Idea 3, the real split model: backbone, heads, quantum head export and paths, leakage, profile.
 
 One quick transfer run at k=4 (few epochs) is shared by most tests, so the
-file stays fast; the full-size numbers come from the E8 run, not from here.
+file stays fast; the full-size numbers come from the E9 run, not from here.
 Packed inference runs on the Torino snapshot (133 qubits) as the design asks;
 the live SamplerV2 branch is exercised on a 27-qubit snapshot in local mode.
 """
@@ -425,7 +425,7 @@ def test_measured_profile_matches_schema(quick, data):
     prof = PR.measured_profile({4: k4, 2: k2})
     PR.validate_profile(prof)
     assert json.loads(json.dumps(prof)) == prof
-    assert prof["input_bytes"] == 256 and prof["classes"] == 10 and prof["source"] == "measured (E8)"
+    assert prof["input_bytes"] == 256 and prof["classes"] == 10 and prof["source"] == "measured (E9)"
     cuts = {c["name"]: c for c in prof["cuts"]}
     assert list(cuts) == ["input", "conv1", "conv2"]
     assert cuts["conv2"]["reid"] == 0.95 and not cuts["conv2"]["private_ok"]    # worst over k

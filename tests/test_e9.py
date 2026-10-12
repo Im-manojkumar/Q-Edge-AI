@@ -1,4 +1,4 @@
-"""E8 helpers: aggregation over seeds, the profile built from them, and the router sweep.
+"""E9 helpers: aggregation over seeds, the profile built from them, and the router sweep.
 
 No training here: the inputs are hand-made rows (fixture values, not measurements) and
 the built-in placeholder profiles.
@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from qedge.experiments import e8_split as E
+from qedge.experiments import e9_split as E
 from qedge.ml import nets
 from qedge.ml.qhead import QuantumHead, quantum_params
 from qedge.orchestrator import split
@@ -107,8 +107,8 @@ def test_leakage_summary_is_worst_over_seeds():
 def test_quick_run_never_writes_the_full_profile():
     assert E.profile_path("results", quick=False).endswith("split_profile.json")
     assert E.profile_path("results", quick=True).endswith("split_profile.quick.json")
-    assert E.result_name("e8_router", quick=False) == "e8_router"
-    assert E.result_name("e8_router", quick=True) == "e8_router.quick"
+    assert E.result_name("e9_router", quick=False) == "e9_router"
+    assert E.result_name("e9_router", quick=True) == "e9_router.quick"
 
 
 def test_quick_figures_read_and_write_only_quick_files(tmp_path):
@@ -116,12 +116,12 @@ def test_quick_figures_read_and_write_only_quick_files(tmp_path):
     res.mkdir()
     summ = E.summarise_heads(head_rows())
     paired = E.paired_differences(head_rows())
-    summ.to_csv(res / "e8_heads_summary.quick.csv", index=False)
-    paired.to_csv(res / "e8_heads_paired.quick.csv", index=False)
+    summ.to_csv(res / "e9_heads_summary.quick.csv", index=False)
+    paired.to_csv(res / "e9_heads_paired.quick.csv", index=False)
     E.make_figures(str(res), str(figs))                     # full run: no full CSVs, nothing drawn
     assert not figs.exists() or not any(figs.iterdir())
     E.make_figures(str(res), str(figs), quick=True)
-    assert sorted(p.name for p in figs.iterdir()) == ["e8_heads.quick.png"]
+    assert sorted(p.name for p in figs.iterdir()) == ["e9_heads.quick.png"]
 
 
 def test_router_catalogue_conditions():
@@ -156,7 +156,7 @@ def test_router_sweep_on_a_tiny_grid(default_profiles):
 
 
 def test_router_picks_a_split_when_a_cut_pays(default_profiles):
-    """The zero splits in the E8 sweep comes from the profiles (camera cuts are either larger
+    """The zero splits in the E9 sweep comes from the profiles (camera cuts are either larger
     than the input or leave almost no work to offload). Give the camera stem an activation
     30x smaller than the input (a what-if, not a measured model) and a slow edge on a slow
     uplink splits there."""

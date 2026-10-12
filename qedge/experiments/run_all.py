@@ -9,7 +9,7 @@ import time
 import pandas as pd
 
 from . import (e1_stacks, e2_quantum_vs_classical, e3_e4_e5, e6_calibration, e7_batching, e7_packing, e7_race,
-               e8_split, figures)
+               e9_split, figures)
 
 
 def save(frames: dict[str, pd.DataFrame], out_dir: str):
@@ -27,7 +27,7 @@ def main(quick: bool = False, only: list[str] | None = None, out_dir: str = "res
         "e5": lambda: e3_e4_e5.e5(quick, qpu_stack),
         "e6": lambda: e6_calibration.run(quick),
         "e7": lambda: {**e7_packing.run(quick), **e7_batching.run(quick), **e7_race.run(quick)},
-        "e8": lambda: e8_split.run(quick, out_dir),
+        "e9": lambda: e9_split.run(quick, out_dir),
     }
     # An unknown name would otherwise run nothing yet still rewrite run_meta.json and every
     # figure, which looks like success; stop before touching anything.
@@ -63,9 +63,9 @@ def main(quick: bool = False, only: list[str] | None = None, out_dir: str = "res
     figures.make_all(out_dir, fig_dir)
     for mod in (e7_packing, e7_batching, e7_race):
         mod.make_figures(out_dir, fig_dir)
-    # E8's quick results carry a .quick suffix (they never replace the full run's), and so do
+    # E9's quick results carry a .quick suffix (they never replace the full run's), and so do
     # their figures.
-    e8_split.make_figures(out_dir, fig_dir, quick=quick)
+    e9_split.make_figures(out_dir, fig_dir, quick=quick)
 
 
 if __name__ == "__main__":

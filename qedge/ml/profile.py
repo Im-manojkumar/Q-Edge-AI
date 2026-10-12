@@ -54,7 +54,7 @@ def _by_name(rows: list[dict], key: str) -> dict:
     return {r[key]: r for r in rows}
 
 
-def measured_profile(per_k: dict, name: str = "digits", label: str | None = None, source: str = "measured (E8)",
+def measured_profile(per_k: dict, name: str = "digits", label: str | None = None, source: str = "measured (E9)",
                      classes: int = 10, ref_k: int | None = None, max_reid: float | None = None,
                      max_r2_beyond_label: float = L.DEFAULT_MAX_R2_BEYOND_LABEL,
                      relative_to_label: bool = True) -> dict:

@@ -156,7 +156,7 @@ arrival rate (0.6 tasks/s) and a mix of 40% quantum simulation, 30% optimisation
 A small CNN backbone runs on the edge, a k-number embedding (k = 2..8) comes out of it, and a head turns it into
 10 class scores: a linear layer, a parameter-matched MLP, or a k-qubit variational circuit with a linear readout
 (the "quantum head", a dressed quantum circuit after Mari et al. 2020). The quantum head assists the classical
-model; measured so far it is level with or below the classical heads (see `qedge/ml/__init__.py` and E8).
+model; measured so far it is level with or below the classical heads (see `qedge/ml/__init__.py` and E9).
 
 | Figure / rule | Value | Basis |
 |---|---|---|
@@ -177,12 +177,12 @@ model; measured so far it is level with or below the classical heads (see `qedge
 
 The router chooses where to cut the network (`edge_gpu>conv2>cloud_gpu`) and whether the head runs classically
 or on a quantum resource (`edge_gpu>embedding>qpu`). It reads a *split profile*: `results/split_profile.json`
-when E8 has written it (loaded by `Orchestrator()`, `qedge split profile` shows what is loaded), else built-in
+when E9 has written it (loaded by `Orchestrator()`, `qedge split profile` shows what is loaded), else built-in
 defaults.
 
 | Figure / rule | Value | Basis |
 |---|---|---|
-| `digits` defaults | bytes and FLOPs from the architecture; head accuracies 0.80 (linear, MLP), 0.75 (quantum), 0.70 (L = 0) and "not private" everywhere | **placeholders**, pessimistic round numbers so the router never favours the quantum head before E8 has measured it; a measured k replaces its entry, an unmeasured k keeps the placeholder and says so |
+| `digits` defaults | bytes and FLOPs from the architecture; head accuracies 0.80 (linear, MLP), 0.75 (quantum), 0.70 (L = 0) and "not private" everywhere | **placeholders**, pessimistic round numbers so the router never favours the quantum head before E9 has measured it; a measured k replaces its entry, an unmeasured k keeps the placeholder and says so |
 | `camera` profile | MobileNetV2 1.0 at 224x224 with a k-dim bottleneck: about 300 M multiply-adds per image (Sandler et al., 2018) minus the 1000-way classifier; activation sizes from the architecture; input 0.15 MB per image as in `make_inference` | **assumption profile**: nothing is measured on it and it has no trained model, so it can be planned but not run. Every cut but the embedding counts as not private; the embedding's accuracies and privacy verdict are inherited from digits and labelled so |
 | FLOPs after a cut | total(k) - front FLOPs | a split neither adds nor loses work against the whole model |
 | What comes back | float32 logits (4 x classes bytes per image) from a classical back; k expectation values (4 x k bytes) from the quantum head, whose linear readout runs on the edge | |

@@ -296,7 +296,7 @@ class Orchestrator:
     def __init__(self, policy: str | Policy = "qedge_adaptive", sim_stack: str = "qiskit", qpu_stack: str = "ibm-auto",
                  config: str | None = None, log_path: str | None = "results/live_log.jsonl"):
         load_calibration()
-        try:   # the measured split profile (E8) when it exists, as for calibration.json
+        try:   # the measured split profile (E9) when it exists, as for calibration.json
             split.load_profiles(keep=True)
         except ValueError as e:   # a malformed file: keep the built-in profiles, say so
             log.warning("ignoring results/split_profile.json: %s", e)

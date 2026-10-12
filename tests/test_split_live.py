@@ -340,7 +340,7 @@ def test_split_shapes_the_cost_model_rejects_are_not_run(live, tmp_path):
 
 # ---------------------------------------------------------------- CLI
 def test_experiments_refuse_an_unknown_step_before_writing_anything(tmp_path):
-    """An unknown step (as `experiments --only e8` was before E8 joined run_all) used to run
+    """An unknown step (as `experiments --only e9` was before E9 joined run_all) used to run
     nothing and still rewrite run_meta.json and every figure."""
     from qedge.experiments import run_all
     out, fig = tmp_path / "results", tmp_path / "figures"

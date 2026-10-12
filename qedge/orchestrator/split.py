@@ -27,7 +27,7 @@ Assumptions (all of them, so they can be checked against the report):
   (multiply-add = 2 FLOPs; bias, ReLU and pooling not counted; tensors as float32). The
   head accuracies and every leakage figure are PLACEHOLDERS, not measurements: pessimistic
   round numbers (quantum head below the classical heads, nothing transmitted is private)
-  that ``load_profiles`` replaces with the measured profile from experiment E8.
+  that ``load_profiles`` replaces with the measured profile from experiment E9.
 * ``camera`` is an assumption profile: MobileNetV2 (1.0, 224x224) with a k-dim bottleneck
   before the head. FLOPs from the published total of about 300 M multiply-adds per image
   (Sandler et al., 2018), minus its 1000-way classifier; activation sizes from the
@@ -50,7 +50,7 @@ Assumptions (all of them, so they can be checked against the report):
   and every gate or reason text that uses them says they were measured on digits.
 * Quantum head quality = f x (ideal quantum accuracy) + (1 - f) / classes, f = estimated
   circuit fidelity: an error anywhere randomises the answer. This is a model (pessimistic
-  for errors that do not flip the argmax); E8 checks it against emulated-device runs.
+  for errors that do not flip the argmax); E9 checks it against emulated-device runs.
 * Shot noise of the quantum head's <Z_i> estimates is not modelled in its quality.
 """
 from __future__ import annotations
@@ -77,7 +77,7 @@ BYTES_PER_VALUE = 4                    # float32 activations
 
 # Placeholder accuracies for the digits defaults, the same for every k. NOT measured:
 # pessimistic round numbers with the quantum head below the classical heads, so the router
-# never favours the quantum head before E8 has measured it.
+# never favours the quantum head before E9 has measured it.
 PLACEHOLDER_ACCURACY = {"linear": 0.80, "mlp": 0.80, "quantum": 0.75, "quantum_l0": 0.70}
 PLACEHOLDER_NOTE = "built-in placeholder (accuracy and leakage not measured)"
 
@@ -167,7 +167,7 @@ def digits_default(layers: int = DEFAULT_LAYERS) -> dict:
     return {
         "name": "digits", "label": "8x8 digits, small CNN split model",
         "source": "built-in defaults (bytes and FLOPs from the architecture; accuracy and leakage are "
-                  "placeholders until E8 writes results/split_profile.json)",
+                  "placeholders until E9 writes results/split_profile.json)",
         "classes": classes, "input_bytes": 64 * BYTES_PER_VALUE,
         "cuts": [
             # Sending the input is sending the image: the attacker's copy is exact.
@@ -228,7 +228,7 @@ def _defaults() -> dict[str, dict]:
     return {"digits": d, "camera": camera_profile(d)}
 
 
-# Placeholders overwritten by results/split_profile.json when E8 has run (same pattern as
+# Placeholders overwritten by results/split_profile.json when E9 has run (same pattern as
 # CALIBRATION / load_calibration in workloads.py).
 PROFILES: dict[str, dict] = _defaults()
 
