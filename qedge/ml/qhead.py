@@ -247,7 +247,7 @@ class QuantumHead:
                        {"hardware": res.hardware, "job_ids": res.job_ids, **res.meta})
 
     def predict_packed(self, cal_or_backend, Z, shots: int = 1000, per_job: int = 8, buffer: int = 1,
-                       crosstalk_factor: float = 1.0, seed: int = 17) -> HeadRun:
+                       crosstalk_factor: float = 1.0, seed: int = 17, cancel=None) -> HeadRun:
         """Several samples' circuits side by side in one QPU job (``qedge.quantum.packing``).
 
         Samples are taken ``per_job`` at a time; for each group the device is
@@ -263,7 +263,11 @@ class QuantumHead:
         count is the planned one: every group is allocated first, so samples
         that do not fit and need extra jobs are counted before submission. QPU
         seconds and price come from ``packing_cost`` (catalogue figures and
-        Braket-style pricing, both assumptions)."""
+        Braket-style pricing, both assumptions).
+
+        ``cancel`` (a ``CancelToken``, race mode) is checked before every job, and a
+        live job is registered on it so a cancel reaches the provider; an emulated
+        job, once started, runs to its end."""
         from ..executor import HW_MAX_CIRCUITS, HW_MAX_SHOTS
         from ..quantum import packing as P
 
@@ -296,13 +300,17 @@ class QuantumHead:
         submitted = 0
         for idx, cal, job in planned:
             job_id = None
+            if cancel is not None:
+                cancel.raise_if_cancelled()
             if live and cal.source == "live":  # tested in local mode only (fake backend), never on a real account
                 if submitted >= HW_MAX_CIRCUITS:   # belt and braces: the plan above already enforces this
                     raise RuntimeError(f"refusing live job {submitted + 1} (QEDGE_HW_MAX_CIRCUITS={HW_MAX_CIRCUITS})")
                 from qiskit_ibm_runtime import SamplerV2
+
+                from ..quantum.backends.base import await_job
                 rjob = SamplerV2(mode=cal.backend).run([job.circuit], shots=shots)
                 submitted += 1
-                pub = rjob.result()[0]
+                pub = await_job(rjob, cancel)[0]
                 counts = P.split_counts(job, {r: getattr(pub.data, r).get_counts() for r in job.registers})
                 job_id = rjob.job_id()
             else:

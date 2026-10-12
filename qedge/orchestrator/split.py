@@ -317,12 +317,15 @@ def merge_profile(default: dict, measured: dict | None) -> dict:
     return out
 
 
-def load_profiles(path: str = "results/split_profile.json") -> dict[str, dict]:
+def load_profiles(path: str = "results/split_profile.json", keep: bool = False) -> dict[str, dict]:
     """Rebuild ``PROFILES`` from the built-in defaults and merge measured profiles over them.
 
     The file holds one profile, a list of profiles, or {name: profile}. A measured digits
     profile also updates what ``camera`` inherits, unless the file has its own camera
-    profile. A missing file resets ``PROFILES`` to the defaults."""
+    profile. A missing file resets ``PROFILES`` to the defaults. With ``keep``, profiles
+    registered at runtime under other names (not digits, camera or a name in the file)
+    stay registered; the orchestrator loads this way so it does not drop them."""
+    extra = {n: p for n, p in PROFILES.items() if n not in ("digits", "camera")} if keep else {}
     measured: dict[str, dict] = {}
     if os.path.exists(path):
         with open(path) as f:
@@ -340,8 +343,39 @@ def load_profiles(path: str = "results/split_profile.json") -> dict[str, dict]:
     digits = merge_profile(digits_default(), measured.pop("digits", None))
     camera = merge_profile(camera_profile(digits), measured.pop("camera", None))
     PROFILES.clear()
-    PROFILES.update({"digits": digits, "camera": camera, **measured})
+    PROFILES.update({"digits": digits, "camera": camera, **extra, **measured})
     return PROFILES
+
+
+def profile_tables(p: dict) -> tuple[list[dict], list[dict]]:
+    """Display rows for a profile (CLI and dashboard): per k the head accuracies and the
+    embedding's leakage, and per named cut its size and leakage. Numbers are formatted as
+    text; "-" marks a figure that was not measured."""
+    def f(x, spec):
+        return "-" if x is None else format(x, spec)
+
+    def verdict(c: dict) -> str:
+        if c.get("inherited_from"):
+            return f"{'private' if c['private_ok'] else 'not private'} (inherited from {c['inherited_from']})"
+        if c["private_ok"]:
+            return "private against these attacks"
+        return "not private" if c.get("reid") is not None or c["name"] == "input" else "not private (not measured)"
+
+    by_k = []
+    for k in sorted(p["embedding"], key=int):
+        e = p["embedding"][k]
+        a = e["accuracy"]
+        by_k.append({"k": int(k), **{h: f(a[h], ".3f") for h in HEADS + QHEADS},
+                     "bytes": int(e["bytes"]), "reid": f(e["reid"], ".3f"),
+                     "reid_beyond_label": f(e.get("reid_beyond_label"), ".3f"),
+                     "r2_beyond_label": f(e["r2_beyond_label"], "+.3f"),
+                     "verdict": verdict({**e, "name": "embedding"}),
+                     "source": e.get("source", p["source"])})
+    cuts = [{"cut": c["name"], "values": int(c["values"]), "bytes": int(c["bytes"]),
+             "front_flop": int(c["front_flop"]), "reid": f(c["reid"], ".3f"),
+             "reid_beyond_label": f(c.get("reid_beyond_label"), ".3f"),
+             "r2_beyond_label": f(c["r2_beyond_label"], "+.3f"), "verdict": verdict(c)} for c in p["cuts"]]
+    return by_k, cuts
 
 
 def get_profile(name: str) -> dict:
@@ -423,6 +457,33 @@ def transmitted(p: Placement, resources: dict[str, Resource]) -> list[str]:
         if front.is_edge:
             sent.append(p.split or "embedding")
     return sent
+
+
+def describe_placement(w: Workload, p: Placement, resources: dict[str, Resource] | None = None) -> str:
+    """Plain words for where ``p`` cuts the model and what leaves the edge, in bytes
+    from the profile (per image and for the batch)."""
+    if resources is None:
+        from ..resources import load_catalogue
+        resources = load_catalogue()
+    prof, k, batch = get_profile(w.params["profile"]), int(w.params["k"]), int(w.params["batch"])
+    sent = transmitted(p, resources)
+    if not sent:
+        return f"whole model on {p.classical}; nothing leaves the edge"
+    if p.quantum is not None:
+        where = (f"{p.classical} runs up to the embedding, the quantum head runs on {p.quantum}"
+                 if resources[p.classical].is_edge else
+                 f"{p.classical} runs the backbone on the uploaded input, the quantum head runs on {p.quantum}")
+    elif p.split is not None:
+        where = f"{p.classical} runs up to {p.split}, {p.back} runs the rest"
+    else:
+        where = f"whole model on {p.classical}"
+    parts = []
+    for name in sent:
+        nbytes = prof["input_bytes"] if name == "input" else cut_info(prof, name, k)["bytes"]
+        what = ("the raw input" if name == "input" else f"the {k}-number embedding" if name == "embedding"
+                else f"the {name} activation")
+        parts.append(f"{what} ({nbytes:,} B per image, {nbytes * batch:,} B for {batch})")
+    return f"{where}; leaves the edge: {', '.join(parts)}"
 
 
 def _pct(x: float) -> str:

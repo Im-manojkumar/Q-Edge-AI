@@ -46,6 +46,12 @@ class Decision:
         c = self.chosen
         lines.append(f"  predicted latency {c.latency_s:.3g}s (deadline {self.workload.deadline_s:.3g}s), "
                      f"edge energy {c.edge_energy_j:.3g} J, cost ${c.cost_usd:.3g}, quality {c.quality:.3f}")
+        if self.workload.kind == "split_inference":
+            from .split import describe_placement
+            try:
+                lines.append(f"  split: {describe_placement(self.workload, self.placement)}")
+            except (KeyError, ValueError):   # a custom catalogue name the built-in one lacks
+                pass
         for label, checks in self.quantum_checks.items():
             verdict = "open" if all(ok for _, ok, _ in checks) else "closed"
             lines.append(f"  quantum gate for {label}: {verdict}")

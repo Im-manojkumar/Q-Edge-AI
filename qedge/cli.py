@@ -24,14 +24,15 @@ def main(argv=None):
 
     sub.add_parser("status", help="show which quantum stacks and real devices are usable")
 
+    from .workloads import BUILDERS
     s = sub.add_parser("submit", help="plan and run one workload for real")
-    s.add_argument("kind", choices=["inference", "training", "optimization", "kernel_classification", "quantum_simulation"])
-    s.add_argument("params", nargs="*", help="key=value, e.g. n=8 steps=4")
+    s.add_argument("kind", choices=list(BUILDERS))
+    s.add_argument("params", nargs="*", help="key=value, e.g. n=8 steps=4, or k=4 batch=8 privacy=true")
     s.add_argument("--policy", default="qedge_adaptive")
     s.add_argument("--sim-stack", default="qiskit", choices=["qiskit", "pennylane", "cirq", "braket-local"])
     s.add_argument("--qpu-stack", default="ibm-auto", choices=["ibm-auto", "ibm", "braket", "ibm-emulator"],
                    help="ibm-auto picks device and qubits from calibration (default)")
-    s.add_argument("--force", help="run this placement instead, e.g. cloud_cpu+qpu")
+    s.add_argument("--force", help="run this placement instead, e.g. cloud_cpu+qpu or edge_gpu>conv2>cloud_gpu")
     s.add_argument("--plan-only", action="store_true", help="decide but do not execute")
     s.add_argument("--race", action="store_true",
                    help="if the QPU is used, run the best classical placement at the same time and deliver the QPU "
@@ -53,9 +54,9 @@ def main(argv=None):
     k.add_argument("--buffer", type=int, default=1, choices=[0, 1], help="1 leaves a free qubit ring around each program")
     k.add_argument("--shots", type=int, default=4000)
 
-    e = sub.add_parser("experiments", help="run E1-E7 and regenerate figures")
+    e = sub.add_parser("experiments", help="run E1-E8 and regenerate figures")
     e.add_argument("--quick", action="store_true")
-    e.add_argument("--only", nargs="*", choices=["e1", "e2", "e3", "e4", "e5", "e6", "e7"])
+    e.add_argument("--only", nargs="*", choices=["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8"])
     e.add_argument("--qpu-stack", default="ibm-auto")
 
     c = sub.add_parser("calibration", help="calibration-aware routing: devices, qubit choice, live logging, drift")
@@ -64,6 +65,15 @@ def main(argv=None):
     c.add_argument("--every", type=float, default=600, help="log: seconds between polls")
     c.add_argument("--count", type=int, default=1, help="log: number of polls (144 at 600 s = one day)")
     c.add_argument("--snapshots", action="store_true", help="show/pick: ignore live IBM data")
+
+    sp = sub.add_parser("split", help="split model (idea 3): every candidate cut and where it runs, or the profile")
+    sp.add_argument("action", choices=["plan", "profile"])
+    sp.add_argument("params", nargs="*", help="plan: key=value, e.g. k=4 batch=16 privacy=true deadline_s=2 profile=camera")
+    sp.add_argument("--bandwidth", type=float, help="plan: uplink of every cloud resource in Mbps (default: catalogue)")
+    sp.add_argument("--edge", choices=["edge_gpu", "edge_cpu"], help="plan: the edge device (default: both offered)")
+    sp.add_argument("--policy", default="qedge_adaptive")
+    sp.add_argument("--qpu-stack", default="ibm-auto", choices=["ibm-auto", "ibm", "braket", "ibm-emulator"])
+    sp.add_argument("--name", help="profile: show only this profile (default: all)")
 
     sub.add_parser("report", help="rebuild REPORT.md from results/")
     sub.add_parser("dashboard", help="launch the Streamlit dashboard")
@@ -125,11 +135,79 @@ def main(argv=None):
             print(f"not packed: {run.unplaced or ''} {run.skipped or ''}")
     elif a.cmd == "calibration":
         _calibration(a)
+    elif a.cmd == "split":
+        _split(a)
     elif a.cmd == "report":
         from .experiments.report import build
         build()
     elif a.cmd == "dashboard":
         sys.exit(subprocess.call([sys.executable, "-m", "streamlit", "run", "dashboard/app.py"]))
+
+
+def _split(a):
+    import pandas as pd
+
+    from .orchestrator import split
+    if a.action == "profile":
+        try:
+            split.load_profiles(keep=True)
+        except ValueError as e:
+            sys.exit(f"results/split_profile.json does not match the split profile schema: {e}")
+        names = [a.name] if a.name else list(split.PROFILES)
+        for name in names:
+            print(profile_text(split.get_profile(name)))
+            print()
+        return
+    from .orchestrator.engine import Orchestrator
+    params = _params(a.params)
+    orch = Orchestrator(a.policy, qpu_stack=a.qpu_stack, log_path=None)
+    for r in orch.resources.values():  # the policy and its cost model share these objects
+        if a.bandwidth is not None and not r.is_edge:
+            r.uplink_mbps = a.bandwidth
+        if a.edge is not None and r.is_edge and not r.is_quantum and r.name != a.edge:
+            r.available = False
+    w, d = orch.plan("split_inference", **params)
+    prof = split.get_profile(w.params["profile"])
+    rows = []
+    for e in d.estimates:
+        sent = split.transmitted(e.placement, orch.resources)
+        size = [prof["input_bytes"] if t == "input" else split.cut_info(prof, t, w.params["k"])["bytes"] for t in sent]
+        rows.append({"placement": e.placement.label, "chosen": "<-" if e.placement == d.placement else "",
+                     "leaves edge (per image)": ", ".join(f"{t} {b:,} B" for t, b in zip(sent, size)) or "nothing",
+                     "latency_s": f"{e.latency_s:.3g}", "edge_energy_j": f"{e.edge_energy_j:.3g}",
+                     "cost_usd": f"${e.cost_usd:.3g}", "quality": f"{e.quality:.3f}",
+                     "score": f"{e.score:.3g}" if e.feasible and e.score is not None else "-",
+                     "feasible": "yes" if e.feasible else "no: " + "; ".join(e.reasons)})
+    up = ", ".join(f"{r.name} {r.uplink_mbps:g}" for r in orch.resources.values() if not r.is_edge)
+    print(f"split_inference: profile {prof['name']} ({prof['source']}), k={w.params['k']}, "
+          f"batch {w.params['batch']}, privacy {w.privacy}, deadline {w.deadline_s:.3g}s")
+    print(f"uplink Mbps: {up}" + (f"; edge device: {a.edge}" if a.edge else ""))
+    print()
+    with pd.option_context("display.width", 250, "display.max_columns", 20, "display.max_colwidth", 120):
+        print(pd.DataFrame(rows).to_string(index=False))
+    print()
+    print(d.explain())
+
+
+def profile_text(p: dict) -> str:
+    """The loaded split profile as text: source, accuracies per head and k, leakage per cut."""
+    import pandas as pd
+
+    lines = [f"profile {p['name']}: {p['label']}", f"  source: {p['source']}",
+             f"  input {p['input_bytes']:,} B per image, {p['classes']} classes"]
+    from .orchestrator.split import profile_tables
+    acc, cuts = profile_tables(p)
+    with pd.option_context("display.width", 250, "display.max_colwidth", 80):
+        lines.append("  test accuracy per head and embedding size k; leakage of the k-number embedding:")
+        lines += ["    " + x for x in pd.DataFrame(acc).to_string(index=False).splitlines()]
+        lines.append("  leakage of the other cuts:")
+        lines += ["    " + x for x in pd.DataFrame(cuts).to_string(index=False).splitlines()]
+    priv = p.get("privacy") or {}
+    if priv:
+        lines.append(f"  privacy rule: {priv.get('rule')}; attacks: {', '.join(priv.get('attacks', []))}")
+    lines.append("  private_ok holds against the attacks tried only, never as a guarantee; "
+                 "reid = share of test images re-identified from the transmitted tensor (- = not measured)")
+    return "\n".join(lines)
 
 
 def _calibration(a):
