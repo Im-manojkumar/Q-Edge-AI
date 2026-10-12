@@ -1,0 +1,338 @@
+{
+ "name": "digits",
+ "label": "digits: 8x8 CNN backbone, k-dim embedding, classical or quantum head",
+ "source": "measured (E8): test accuracy mean over seeds 0, 1, 2; leakage worst case over seeds",
+ "classes": 10,
+ "input_bytes": 256,
+ "cuts": [
+  {
+   "name": "input",
+   "values": 64,
+   "bytes": 256,
+   "front_flop": 0.0,
+   "back_flop": 46672.0,
+   "back_flop_by_k": {
+    "2": 46376.0,
+    "3": 46524.0,
+    "4": 46672.0,
+    "5": 46820.0,
+    "6": 46968.0,
+    "8": 47264.0
+   },
+   "reid": 1.0,
+   "reid_beyond_label": 0.9722222222222222,
+   "r2_beyond_label": 0.5810275249943667,
+   "reid_label": 0.027777777777777776,
+   "private_ok": false
+  },
+  {
+   "name": "conv1",
+   "values": 128,
+   "bytes": 512,
+   "front_flop": 9216.0,
+   "back_flop": 37456.0,
+   "back_flop_by_k": {
+    "2": 37160.0,
+    "3": 37308.0,
+    "4": 37456.0,
+    "5": 37604.0,
+    "6": 37752.0,
+    "8": 38048.0
+   },
+   "reid": 1.0,
+   "reid_beyond_label": 0.9722222222222222,
+   "r2_beyond_label": 0.5327797974936408,
+   "reid_label": 0.027777777777777776,
+   "private_ok": false
+  },
+  {
+   "name": "conv2",
+   "values": 64,
+   "bytes": 256,
+   "front_flop": 46080.0,
+   "back_flop": 592.0,
+   "back_flop_by_k": {
+    "2": 296.0,
+    "3": 444.0,
+    "4": 592.0,
+    "5": 740.0,
+    "6": 888.0,
+    "8": 1184.0
+   },
+   "reid": 0.925,
+   "reid_beyond_label": 0.8972222222222223,
+   "r2_beyond_label": 0.40071830296601785,
+   "reid_label": 0.027777777777777776,
+   "private_ok": false
+  }
+ ],
+ "embedding": {
+  "2": {
+   "bytes": 8,
+   "front_flop": 46336.0,
+   "back_flop": 40.0,
+   "reid": 0.03888888888888889,
+   "reid_beyond_label": 0.03611111111111111,
+   "r2_beyond_label": -0.08956800139349985,
+   "reid_label": 0.027777777777777776,
+   "private_ok": false,
+   "accuracy": {
+    "linear": 0.6925925925925926,
+    "mlp": 0.6472222222222223,
+    "quantum": 0.6296296296296297,
+    "quantum_l0": 0.6361111111111111
+   },
+   "classical_head": "linear",
+   "classical_accuracy": 0.6925925925925926,
+   "classical_selected_on": "validation",
+   "quantum_circuit": {
+    "n_qubits": 2,
+    "layers": 2,
+    "depth": 9,
+    "n_1q": 14,
+    "n_2q": 2
+   },
+   "params": {
+    "linear": 30,
+    "mlp": 36,
+    "quantum": 42
+   },
+   "accuracy_std": {
+    "linear": 0.06940739752559318,
+    "mlp": 0.09141379262169076,
+    "quantum": 0.04781759753213097,
+    "quantum_l0": 0.052996622300941425
+   },
+   "seeds": [
+    0,
+    1,
+    2
+   ]
+  },
+  "3": {
+   "bytes": 12,
+   "front_flop": 46464.0,
+   "back_flop": 60.0,
+   "reid": 0.06666666666666667,
+   "reid_beyond_label": 0.058333333333333334,
+   "r2_beyond_label": 0.01872937829705712,
+   "reid_label": 0.027777777777777776,
+   "private_ok": false,
+   "accuracy": {
+    "linear": 0.8675925925925926,
+    "mlp": 0.8537037037037036,
+    "quantum": 0.8537037037037036,
+    "quantum_l0": 0.85
+   },
+   "classical_head": "linear",
+   "classical_accuracy": 0.8675925925925926,
+   "classical_selected_on": "validation",
+   "quantum_circuit": {
+    "n_qubits": 3,
+    "layers": 2,
+    "depth": 13,
+    "n_1q": 21,
+    "n_2q": 6
+   },
+   "params": {
+    "linear": 40,
+    "mlp": 52,
+    "quantum": 58
+   },
+   "accuracy_std": {
+    "linear": 0.0636064610947985,
+    "mlp": 0.04781759753213095,
+    "quantum": 0.05735511357758732,
+    "quantum_l0": 0.04867059852204231
+   },
+   "seeds": [
+    0,
+    1,
+    2
+   ]
+  },
+  "4": {
+   "bytes": 16,
+   "front_flop": 46592.0,
+   "back_flop": 80.0,
+   "reid": 0.10555555555555556,
+   "reid_beyond_label": 0.09722222222222222,
+   "r2_beyond_label": 0.05820691723419347,
+   "reid_label": 0.027777777777777776,
+   "private_ok": false,
+   "accuracy": {
+    "linear": 0.9500000000000001,
+    "mlp": 0.9444444444444445,
+    "quantum": 0.9314814814814815,
+    "quantum_l0": 0.9481481481481481
+   },
+   "classical_head": "linear",
+   "classical_accuracy": 0.9500000000000001,
+   "classical_selected_on": "validation",
+   "quantum_circuit": {
+    "n_qubits": 4,
+    "layers": 2,
+    "depth": 15,
+    "n_1q": 28,
+    "n_2q": 8
+   },
+   "params": {
+    "linear": 50,
+    "mlp": 70,
+    "quantum": 74
+   },
+   "accuracy_std": {
+    "linear": 0.009622504486493794,
+    "mlp": 0.01469861839480327,
+    "quantum": 0.012525693757841383,
+    "quantum_l0": 0.011226255234242734
+   },
+   "seeds": [
+    0,
+    1,
+    2
+   ]
+  },
+  "5": {
+   "bytes": 20,
+   "front_flop": 46720.0,
+   "back_flop": 100.0,
+   "reid": 0.09444444444444444,
+   "reid_beyond_label": 0.08333333333333333,
+   "r2_beyond_label": 0.06546367507980655,
+   "reid_label": 0.027777777777777776,
+   "private_ok": false,
+   "accuracy": {
+    "linear": 0.9648148148148148,
+    "mlp": 0.950925925925926,
+    "quantum": 0.9101851851851851,
+    "quantum_l0": 0.9601851851851851
+   },
+   "classical_head": "linear",
+   "classical_accuracy": 0.9648148148148148,
+   "classical_selected_on": "validation",
+   "quantum_circuit": {
+    "n_qubits": 5,
+    "layers": 2,
+    "depth": 17,
+    "n_1q": 35,
+    "n_2q": 10
+   },
+   "params": {
+    "linear": 60,
+    "mlp": 90,
+    "quantum": 90
+   },
+   "accuracy_std": {
+    "linear": 0.0069905874400654835,
+    "mlp": 0.008486251286955277,
+    "quantum": 0.03159022612820737,
+    "quantum_l0": 0.0042431256434776144
+   },
+   "seeds": [
+    0,
+    1,
+    2
+   ]
+  },
+  "6": {
+   "bytes": 24,
+   "front_flop": 46848.0,
+   "back_flop": 120.0,
+   "reid": 0.13055555555555556,
+   "reid_beyond_label": 0.12222222222222222,
+   "r2_beyond_label": 0.10464619118487428,
+   "reid_label": 0.027777777777777776,
+   "private_ok": false,
+   "accuracy": {
+    "linear": 0.9694444444444444,
+    "mlp": 0.9592592592592593,
+    "quantum": 0.9296296296296296,
+    "quantum_l0": 0.9675925925925926
+   },
+   "classical_head": "linear",
+   "classical_accuracy": 0.9694444444444444,
+   "classical_selected_on": "validation",
+   "quantum_circuit": {
+    "n_qubits": 6,
+    "layers": 2,
+    "depth": 19,
+    "n_1q": 42,
+    "n_2q": 12
+   },
+   "params": {
+    "linear": 70,
+    "mlp": 112,
+    "quantum": 106
+   },
+   "accuracy_std": {
+    "linear": 0.002777777777777768,
+    "mlp": 0.0042431256434776144,
+    "quantum": 0.00578240555407257,
+    "quantum_l0": 0.001603750747748955
+   },
+   "seeds": [
+    0,
+    1,
+    2
+   ]
+  },
+  "8": {
+   "bytes": 32,
+   "front_flop": 47104.0,
+   "back_flop": 160.0,
+   "reid": 0.1527777777777778,
+   "reid_beyond_label": 0.14444444444444443,
+   "r2_beyond_label": 0.12558391113513623,
+   "reid_label": 0.027777777777777776,
+   "private_ok": false,
+   "accuracy": {
+    "linear": 0.975,
+    "mlp": 0.9629629629629629,
+    "quantum": 0.9185185185185185,
+    "quantum_l0": 0.9685185185185184
+   },
+   "classical_head": "linear",
+   "classical_accuracy": 0.975,
+   "classical_selected_on": "validation",
+   "quantum_circuit": {
+    "n_qubits": 8,
+    "layers": 2,
+    "depth": 23,
+    "n_1q": 56,
+    "n_2q": 16
+   },
+   "params": {
+    "linear": 90,
+    "mlp": 143,
+    "quantum": 138
+   },
+   "accuracy_std": {
+    "linear": 0.004811252243246865,
+    "mlp": 0.0032075014954979094,
+    "quantum": 0.006415002990995883,
+    "quantum_l0": 0.008018753738744774
+   },
+   "seeds": [
+    0,
+    1,
+    2
+   ]
+  }
+ },
+ "privacy": {
+  "attacks": [
+   "knn",
+   "mlp",
+   "ridge"
+  ],
+  "rule": "reid beyond the label (per image) <= 5 x chance, r2_beyond_label <= 0.1",
+  "note": "private_ok holds against these attacks only; a stronger attacker could do better"
+ },
+ "seeds": [
+  0,
+  1,
+  2
+ ],
+ "data_split_seed": 0
+}
