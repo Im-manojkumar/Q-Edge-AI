@@ -67,3 +67,33 @@ quality, so it is used to *rank* devices and layouts.
 The scheduler sees the nominal figures above, slot queues on every resource, ping RTT, and the queue estimate
 a provider publishes. It does not see true bandwidth, thermal throttling, or the real QPU queue. In the
 simulator those hidden values come from the scenario; the adaptive policy has to learn them from feedback.
+
+## QPU batching and race mode (E7)
+
+These mechanisms live only in the discrete-event simulator; nothing here was run on a real QPU.
+
+| Figure / rule | Value | Basis |
+|---|---|---|
+| Batch closes | at `max_tasks` (8) tasks, or `window_s` (5, 30 or 120 s) after its first task arrived | design choice; checked in arrival order, so an expired batch closes at its expiry time when the next task arrives |
+| What one batch pays | one provider queue wait, one job overhead (3 s) and one per-task fee per round | a batch is submitted as a single job |
+| Queue wait of a batch | the first member's own draw from the scenario's queue distribution | keeps the random-number stream identical to the unbatched run |
+| Multi-round programs (QAOA) | all rounds of a batch run in lockstep: one queue wait for round 1, then rounds back to back; each round is one job holding the members that still have rounds left | assumes a session-like reservation after the first job starts |
+| Qubits a packed program needs | `n + ceil(0.25 n)` (25% idle buffer qubits around it) | placeholder for crosstalk isolation on heavy-hex chips; to be replaced by the packing experiment |
+| Spatial packing | members are packed first-fit decreasing into groups that fit the device (133 qubits); a group runs side by side, groups run back to back | `partial_packing=False` gives the stricter rule: all members side by side, or all back to back |
+| Time and shots of a packed group | the slowest member's execution time; the largest member's shot count, paid once (shots are shared) | optimistic: assumes circuits of different members can be aligned in one submission |
+| Fidelity of a packed program | multiplied by `pack_fidelity_factor` (default 1.0, i.e. no crosstalk penalty) | not measured yet; the integrator sets it from the packing experiment |
+| Splitting a batch's charges | QPU money in proportion to what each member would pay alone; QPU energy in proportion to its execution time | accounting convention; totals are unaffected |
+| Batch window and the policy | the policy sees the expected wait for the batch to close as extra QPU wait (full window for a new batch) | `inform_policy=False` hides it; the adaptive feedback then learns it slowly |
+| Feedback for batched tasks | given when the batch closes | delays learning by up to one window |
+| Race-mode trigger | hedge when P(QPU queue > slack) > 0.05, slack = deadline minus everything except the provider queue | threshold is a parameter; E7 sweeps it |
+| Queue model behind P(miss) | exponential with mean = provider estimate x learned bias | bias = censored exponential MLE of observed / published waits, starting at 1; a lognormal real queue breaks the exponential assumption on purpose in `future_qpu_heavy_tail` |
+| Fallback | best-scoring classical placement predicted to meet the deadline; no hedge if there is none | a fallback expected to be late would only add cost |
+| Which answer counts | the QPU answer if it arrives by the deadline, otherwise the classical one at its own latency | progressive delivery: the classical answer is handed over when ready and stands unless the QPU beats the deadline |
+| Cancellation and charges | the QPU job is cancelled at the deadline; queued jobs that are cancelled cost nothing, jobs that started executing are charged in full; the classical fallback is always charged | assumption about provider billing (per-task/per-shot pricing charged on execution) |
+| Feedback for a cancelled job | latency censored at the deadline; quality not observed (the prediction is fed back, which leaves the learned offset unchanged) | censoring biases the learned latency ratio low |
+
+New scenarios (kept out of the E3 matrix): `future_qpu_heavy_tail` uses the `future_qpu` figures, but the true QPU
+wait is lognormal with the same 12 s mean and sigma 1.5 (median 3.9 s; about 1% of jobs wait more than 10x the
+mean, against 0.005% for an exponential queue). `quantum_heavy_future` uses the `future_qpu` figures, 3x the
+arrival rate (0.6 tasks/s) and a mix of 40% quantum simulation, 30% optimisation, 10% kernel classification,
+15% inference and 5% training.
