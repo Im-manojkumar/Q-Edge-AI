@@ -40,6 +40,14 @@ Assumptions (all of them, so they can be checked against the report):
   head returns k expectation values (4 x k bytes per image) and its linear readout runs on
   the edge. Upload to a quantum resource pays bytes / uplink here; its round trip is the
   per-round hop already in ``CostModel._quantum``.
+* The quantum head's CZ ring is not native on heavy-hex hardware: the workload's two-qubit
+  gate count is scaled by a routing factor measured by transpiling the ring onto FakeTorino
+  (``ROUTING_2Q``), and each added gate adds one layer of depth. The profile's
+  ``quantum_circuit`` keeps the logical (unrouted) figures. As in ``make_optimization``, the
+  routed figures are also what the state-vector simulator is charged for.
+* ``camera`` entries keep the digits privacy verdict (``private_ok``) but set their own
+  ``reid`` / ``r2_beyond_label`` to None; the digits numbers sit under ``inherited_leakage``
+  and every gate or reason text that uses them says they were measured on digits.
 * Quantum head quality = f x (ideal quantum accuracy) + (1 - f) / classes, f = estimated
   circuit fidelity: an error anywhere randomises the answer. This is a model (pessimistic
   for errors that do not flip the argmax); E8 checks it against emulated-device runs.
@@ -98,6 +106,25 @@ def head_circuit(k: int, layers: int) -> Circuit:
 def head_circuit_stats(k: int, layers: int) -> dict:
     c = head_circuit(k, layers)
     return {"n_qubits": k, "layers": layers, "depth": c.depth(), "n_1q": c.n_1q, "n_2q": c.n_2q}
+
+
+# Two-qubit gates per logical CZ after routing the head's CZ ring onto IBM heavy-hex hardware,
+# which has no cycles shorter than 12, so a ring of k > 2 qubits needs SWAPs. Measured on this
+# machine: qiskit transpile of the L = 2 head, optimization_level 3, best of 5 seeds, on
+# FakeTorino (transpiled / logical two-qubit gates: k=3 10/6, k=4 17/8, k=5 24/10, k=6 33/12,
+# k=7 44/14, k=8 40/16). FakeFez gave the same counts except k=6 (34) and k=7 (41). The factor
+# varies with L (k=4: 1.75 at L=1, 2.25 at L=3); the L = 2 figure is used for every L.
+ROUTING_2Q = {2: 1.0, 3: 10 / 6, 4: 17 / 8, 5: 24 / 10, 6: 33 / 12, 7: 44 / 14, 8: 40 / 16}
+
+
+def routed_circuit(qc: dict) -> dict:
+    """The head circuit's figures after routing (see ROUTING_2Q): two-qubit gates scaled by the
+    measured factor for k, and each added two-qubit gate counted as one more layer of depth
+    (an assumption; an upper bound when SWAPs on disjoint qubits run in parallel). A k outside
+    the table gets the largest measured factor."""
+    k, n2 = int(qc["n_qubits"]), int(qc["n_2q"])
+    routed = round(n2 * ROUTING_2Q.get(k, max(ROUTING_2Q.values())))
+    return {**qc, "n_2q": routed, "depth": int(qc["depth"]) + routed - n2}
 
 
 def head_params(k: int, layers: int, classes: int) -> dict:
@@ -169,9 +196,15 @@ def camera_profile(digits: dict) -> dict:
     emb = {}
     for k, e in digits["embedding"].items():
         kk = int(k)
+        # The privacy verdict (private_ok) is inherited; the digits leakage numbers are kept
+        # aside under "inherited_leakage", because no attack was run on this model's activations.
         emb[k] = {**copy.deepcopy(e), "bytes": BYTES_PER_VALUE * kk,
                   "front_flop": float(pool + 2 * 1280 * kk), "back_flop": float(2 * kk * classes),
-                  "inherited_from": "digits: accuracy, params, quantum circuit and privacy verdict"}
+                  "reid": None, "r2_beyond_label": None,
+                  "inherited_leakage": {"reid": e["reid"], "r2_beyond_label": e["r2_beyond_label"]},
+                  "inherited_from": digits["name"],
+                  "source": "assumption: accuracy, params, quantum circuit and privacy verdict inherited "
+                            f"from {digits['name']}; not measured on this model"}
     ref = emb.get(str(DEFAULT_K)) or next(iter(emb.values()))
     total = ref["front_flop"] + ref["back_flop"]
     not_measured = "not measured, assumed not private"
@@ -396,15 +429,34 @@ def _pct(x: float) -> str:
     return f"{x:.0%}" if x >= 0.1 else f"{x:.1%}"
 
 
-def leak_text(c: dict) -> str:
-    if c["name"] == "input":
-        return "the raw input leaves the edge"
+def _measured(c: dict, inputs: str = "inputs") -> str | None:
+    """'re-identify X% of inputs and explain ...' from a cut's leakage numbers, or None."""
     if c.get("reid") is None:
-        return f"{c['name']} leakage not measured, so it counts as not private"
-    s = f"{c['name']} activations re-identify {_pct(c['reid'])} of inputs"
+        return None
+    s = f"re-identify {_pct(c['reid'])} of {inputs}"
     if c.get("r2_beyond_label") is not None:
         s += f" and explain {c['r2_beyond_label']:.2f} of pixel variance beyond the label"
     return s
+
+
+def _inherited(c: dict) -> str:
+    """For a cut whose verdict comes from another model: what was measured there, labelled."""
+    src = c["inherited_from"]
+    m = _measured(c.get("inherited_leakage") or {}, f"{src} inputs")
+    there = f"there its activations {m} against the attacks tried" if m else f"its leakage was not measured on {src} either"
+    return f"privacy verdict inherited from {src} ({there}), not measured on this model"
+
+
+def leak_text(c: dict) -> str:
+    """Why transmitting cut ``c`` is not private."""
+    if c["name"] == "input":
+        return "the raw input leaves the edge"
+    if c.get("inherited_from"):
+        return f"{c['name']} counts as not private: {_inherited(c)}"
+    m = _measured(c)
+    if m is None:
+        return f"{c['name']} leakage not measured, so it counts as not private"
+    return f"{c['name']} activations {m}"
 
 
 def privacy_verdict(w: Workload, p: Placement, resources: dict[str, Resource]) -> tuple[bool, str]:
@@ -423,7 +475,11 @@ def privacy_verdict(w: Workload, p: Placement, resources: dict[str, Resource]) -
             return False, "privacy: " + leak_text(c)
     c = cut_info(prof, sent[-1], k)
     what = f"the {k}-number embedding" if sent[-1] == "embedding" else f"the {sent[-1]} activation"
-    extra = f"; it re-identifies {_pct(c['reid'])} of inputs against the attacks tried" if c.get("reid") is not None else ""
+    if c.get("inherited_from"):
+        extra = "; " + _inherited(c)
+    else:
+        m = _measured(c)
+        extra = f"; it re-identifies {_pct(c['reid'])} of inputs against the attacks tried" if m else ""
     return True, f"only {what} leaves the edge{extra}"
 
 
@@ -512,7 +568,9 @@ def quality_note(w: Workload, e: Estimate) -> str:
     """What the quantum-gate quality check prints for a quantum head."""
     prof = get_profile(w.params["profile"])
     acc = embedding(prof, w.params["k"])["accuracy"][w.params.get("qhead", "quantum")]
+    ent = embedding(prof, w.params["k"])
     f = e.fidelity if e.fidelity is not None else 1.0
-    if f >= 1.0:
-        return f"quantum head accuracy {e.quality:.3f}"
-    return f"quantum head accuracy {e.quality:.3f} (ideal {acc:.3f} at circuit fidelity {f:.3f})"
+    notes = [f"ideal {acc:.3f} at circuit fidelity {f:.3f}"] if f < 1.0 else []
+    if ent.get("inherited_from"):
+        notes.append(f"head accuracies inherited from {ent['inherited_from']}, not measured on this model")
+    return f"quantum head accuracy {e.quality:.3f}" + (f" ({'; '.join(notes)})" if notes else "")

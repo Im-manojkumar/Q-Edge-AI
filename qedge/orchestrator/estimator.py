@@ -44,6 +44,15 @@ class Placement:
         for part in (self.classical, self.quantum, self.split, self.back):
             if part is not None and (not part or "+" in part or ">" in part):
                 raise ValueError(f"bad placement part {part!r}")
+        # "front>cut>x" means a quantum head when x is quantum and a classical back otherwise, so a
+        # split whose x is in the wrong field would not round-trip through ``parse``. Names the
+        # built-in catalogue knows are checked here; ``parse`` checks custom catalogues.
+        if self.split is not None:
+            last = self.back or self.quantum
+            kind = DEFAULT_CATALOGUE.get(last, {}).get("kind")
+            if kind is not None and (kind == "quantum") != (self.quantum is not None):
+                role = "quantum resource" if self.quantum is not None else "classical back"
+                raise ValueError(f"{last!r} is a {kind} resource, not a {role}")
 
     @property
     def label(self) -> str:

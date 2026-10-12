@@ -105,7 +105,10 @@ class QuantumFirst(Policy):
     name = "quantum_first"
 
     def decide(self, w, st):
-        return self._pick_by_preference(w, st, ["cloud_cpu+qpu", "edge_cpu+qpu", "cloud_gpu", "cloud_cpu"])
+        # The split labels only exist for split_inference (quantum head behind an edge backbone),
+        # so the order for every other kind is unchanged.
+        return self._pick_by_preference(w, st, ["cloud_cpu+qpu", "edge_cpu+qpu", "edge_gpu>embedding>qpu",
+                                                "edge_cpu>embedding>qpu", "cloud_gpu", "cloud_cpu"])
 
 
 class RandomPolicy(Policy):
@@ -201,11 +204,21 @@ class QEdgeCostPolicy(Policy):
         feas = [e for e in ests if e.feasible] or ests
         best = min(feas, key=lambda e: e.score if e.score is not None else float("inf"))
         best, explored = self.maybe_explore(w, feas, best)
-        # One entry per quantum resource (the host choice does not change the gate verdict much).
+        # One entry per quantum resource. For the other kinds the host only runs a small classical
+        # share, so its choice barely changes the verdict and the cloud_cpu host is shown. For a split
+        # the edge front runs most of the network and can decide the deadline check, so show the
+        # variant the router actually picked, else the one that went furthest through the gate.
         qlog: dict[str, list] = {}
-        for p, checks in gate_log.items():
-            if p.quantum not in qlog or p == best.placement or p.classical == "cloud_cpu":
-                qlog[p.quantum] = checks
+        if w.kind == "split_inference":
+            by_p = {e.placement: e for e in ests}
+            def rank(p):
+                return (p == best.placement, sum(ok for _, ok, _ in gate_log[p]), -by_p[p].latency_s)
+            for p in sorted(gate_log, key=rank):
+                qlog[p.quantum] = gate_log[p]      # the best-ranked variant is written last
+        else:
+            for p, checks in gate_log.items():
+                if p.quantum not in qlog or p == best.placement or p.classical == "cloud_cpu":
+                    qlog[p.quantum] = checks
         return Decision(w, best.placement, best, ests, self.name, qlog, explored)
 
     def maybe_explore(self, w, feas, best):

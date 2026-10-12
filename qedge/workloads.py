@@ -245,8 +245,9 @@ def make_split_inference(i, rng, **kw) -> Workload:
             readout only)
 
     Assumptions: the default deadline is log-uniform between 0.1 s and 1000 s (interactive to
-    batch jobs), half of the batches are private, and min_quality 0.7 as for kernel
-    classification."""
+    batch jobs), half of the batches are private, min_quality 0.7 as for kernel
+    classification, and memory_gb 0.5 as for make_inference. The quantum profile carries the
+    head circuit after routing onto heavy-hex hardware (``split.routed_circuit``)."""
     from .orchestrator import split
     name = str(kw.get("profile", "digits"))
     prof = split.get_profile(name)
@@ -262,7 +263,7 @@ def make_split_inference(i, rng, **kw) -> Workload:
         head = max(split.HEADS, key=lambda h: acc[h])
     if head not in split.HEADS or qhead not in split.QHEADS:
         raise ValueError(f"head must be best/{'/'.join(split.HEADS)}, qhead {'/'.join(split.QHEADS)}")
-    qc = e["quantum_circuit"] if qhead == "quantum" else split.head_circuit_stats(k, 0)
+    qc = split.routed_circuit(e["quantum_circuit"] if qhead == "quantum" else split.head_circuit_stats(k, 0))
     qp = QuantumProfile(n_qubits=k, depth=int(qc["depth"]), n_1q=int(qc["n_1q"]), n_2q=int(qc["n_2q"]),
                         n_circuits=batch, shots=shots, n_rounds=1,
                         algorithm=f"quantum classifier head ({k} qubits, {int(qc['layers'])} layers)")

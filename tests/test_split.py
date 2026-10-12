@@ -83,6 +83,11 @@ def test_placement_labels_round_trip_and_stay_backward_compatible(profiles):
         Placement("edge_gpu", "qpu", split="embedding", back="cloud_gpu")
     with pytest.raises(ValueError):
         Placement("edge_gpu", back="cloud_gpu")
+    # A split whose last resource sits in the wrong field would not round-trip, so it is refused.
+    with pytest.raises(ValueError, match="quantum resource, not a classical back"):
+        Placement("edge_gpu", split="embedding", back="qpu")
+    with pytest.raises(ValueError, match="classical resource, not a quantum resource"):
+        Placement("edge_gpu", "cloud_gpu", split="embedding")
 
 
 def test_force_parses_split_labels(profiles):
@@ -167,11 +172,12 @@ def test_cost_arithmetic_hand_checked(monkeypatch):
     assert m.estimate(w, Placement("edge_gpu")).latency_s == pytest.approx(8 * 12e6 / 600e9)
     # Quantum head on the QPU: 8 x 16 B up and 8 x 16 B (k expectation values) down, bytes only;
     # the RTT is the per-round hop. Readout (2 x 4 x 10 FLOP/image) runs on the edge.
+    # The circuit is the routed one: 8 logical CZs become 17 on heavy-hex, depth 15 + 9.
     qp = w.quantum
-    assert (qp.n_qubits, qp.n_circuits, qp.shots, qp.n_rounds, qp.depth, qp.n_1q, qp.n_2q) == (4, 8, 1000, 1, 15, 28, 8)
+    assert (qp.n_qubits, qp.n_circuits, qp.shots, qp.n_rounds, qp.depth, qp.n_1q, qp.n_2q) == (4, 8, 1000, 1, 24, 28, 17)
     q = m.estimate(w, Placement("edge_gpu", "qpu", split="embedding"))
     xfer = 128e-6 * 8 / 20 + 128e-6 * 8 / 100
-    exec_t = 8 * 1000 * (2.5e-4 + 15 * 6.6e-7)
+    exec_t = 8 * 1000 * (2.5e-4 + 24 * 6.6e-7)
     assert q.breakdown["transfer"] == pytest.approx(xfer)
     assert q.breakdown["compute"] == pytest.approx(8 * 12e6 / 600e9)
     assert q.breakdown["q_exec"] == pytest.approx(exec_t)
@@ -195,6 +201,22 @@ def test_split_flops_add_up_to_the_whole_model():
     assert [c["bytes"] for c in d["cuts"]] == [256, 512, 256]               # conv1 is bigger than the input
     cam = split.camera_profile(d)
     assert split.total_flop(cam, 4) == pytest.approx(0.6e9, rel=0.01)       # make_inference's MobileNet figure
+
+
+def test_quantum_head_is_costed_after_routing_onto_heavy_hex(profiles):
+    # Logical ring: 8 CZs at k = 4, L = 2. Routed (measured on FakeTorino): 17, depth 15 + 9.
+    logical = split.head_circuit_stats(4, 2)
+    assert split.routed_circuit(logical) == {**logical, "n_2q": 17, "depth": 24}
+    assert split.routed_circuit(split.head_circuit_stats(2, 2))["n_2q"] == 2      # k = 2 has no ring
+    assert split.routed_circuit(split.head_circuit_stats(4, 0))["n_2q"] == 0      # L = 0: no CZs
+    assert split.PROFILES["t_digits"]["embedding"]["4"]["quantum_circuit"]["n_2q"] == 8   # profile stays logical
+    w = split_w(k=4)
+    assert (w.quantum.n_2q, w.quantum.depth, w.quantum.n_1q) == (17, 24, 28)
+    # At the catalogue's error rates routing lowers the estimated circuit fidelity of the head.
+    res = load_catalogue()
+    q = res["qpu"]
+    assert w.quantum.fidelity(q.p1, q.p2, q.readout_err) < 0.85 < 0.88 < copy.replace(
+        w.quantum, n_2q=8).fidelity(q.p1, q.p2, q.readout_err)
 
 
 def test_head_circuit_and_parameter_matching():
@@ -250,6 +272,53 @@ def test_gate_closed_today_because_the_quantum_head_is_less_accurate(profiles):
     d2 = QEdgeCostPolicy(load_catalogue()).decide(split_w(privacy=False, deadline_s=3600), ResourceState())
     failed = [n for n, ok, _ in d2.quantum_checks["qpu"] if not ok]
     assert failed == ["expected quality gain"]
+
+
+def test_gate_shown_for_a_split_is_the_variant_the_router_evaluated(profiles):
+    # Quantum head as accurate as the best classical head (fixture assumption). The edge_cpu front
+    # misses a 3.5 s deadline on the simulator, the edge_gpu front makes it: the explanation must
+    # show the edge_gpu variant, not the first candidate.
+    profiles(acc={**ACC, "quantum": 0.91})
+    w = split_w(profile="t_camera", batch=32, privacy=False, deadline_s=3.5)
+    pol = QEdgeCostPolicy(load_catalogue())
+    d = pol.decide(w, ResourceState())
+    ests = by_label(d.estimates)
+    slow, fast = ests["edge_cpu>embedding>quantum_sim"], ests["edge_gpu>embedding>quantum_sim"]
+    assert slow.latency_s > 3.5 > fast.latency_s and "gate: meets deadline" in slow.reasons
+    assert all(ok for _, ok, _ in d.quantum_checks["quantum_sim"])
+    assert "quantum gate for quantum_sim: open" in d.explain()
+    # When the router picks a quantum head, its own checks are the ones shown (what-if numbers,
+    # as in the test below: quantum head assumed more accurate, future QPU).
+    profiles(acc={**ACC, "quantum": 0.99})
+    d = QEdgeCostPolicy(cheap_future_qpu(sim=False)).decide(split_w(privacy=True, deadline_s=600), ResourceState())
+    assert d.placement == Placement("edge_gpu", "qpu", split="embedding")
+    shown = {n: y for n, _, y in d.quantum_checks["qpu"]}["meets deadline"]
+    assert shown == f"{d.chosen.latency_s:.3g}s vs 600s"
+    assert d.chosen.latency_s < by_label(d.estimates)["edge_cpu>embedding>qpu"].latency_s
+
+
+def test_camera_says_its_privacy_and_accuracy_are_inherited_from_digits(profiles):
+    _, cam = profiles()
+    e = cam["embedding"]["4"]
+    assert e["private_ok"] and e["reid"] is None and e["r2_beyond_label"] is None    # no attack ran on camera
+    assert e["inherited_leakage"] == {"reid": 0.01, "r2_beyond_label": 0.02} and e["inherited_from"] == "t_digits"
+    w = split_w(profile="t_camera", batch=32, privacy=True, deadline_s=3600)
+    d = QEdgeCostPolicy(load_catalogue()).decide(w, ResourceState())
+    checks = {name: why for name, _, why in d.quantum_checks["qpu"]}
+    why = checks["data may leave edge"]
+    assert why.startswith("only the 4-number embedding leaves the edge; privacy verdict inherited from t_digits")
+    assert "re-identify 1.0% of t_digits inputs" in why and "not measured on this model" in why
+    assert "head accuracies inherited from t_digits, not measured on this model" in checks["expected quality gain"]
+    # The digits gate text is unchanged and claims the measurement as its own.
+    wd = split_w(privacy=True, deadline_s=3600)
+    dd = QEdgeCostPolicy(load_catalogue()).decide(wd, ResourceState())
+    why = {n: y for n, _, y in dd.quantum_checks["qpu"]}["data may leave edge"]
+    assert why == "only the 4-number embedding leaves the edge; it re-identifies 1.0% of inputs against the attacks tried"
+    # Built-in camera: digits' placeholder verdict (not private, not measured) is inherited, and says so.
+    wb = make_workload("split_inference", seed=0, profile="camera", batch=4, privacy=True)
+    ok, why = split.privacy_verdict(wb, Placement("edge_gpu", "qpu", split="embedding"), load_catalogue())
+    assert not ok and why == ("privacy: embedding counts as not private: privacy verdict inherited from digits "
+                              "(its leakage was not measured on digits either), not measured on this model")
 
 
 def cheap_future_qpu(sim: bool):
@@ -384,6 +453,17 @@ def test_every_policy_returns_a_candidate_for_split_inference(policy, profiles):
             assert split.privacy_verdict(w, d.placement, res)[0]
 
 
+def test_quantum_first_sends_split_inference_to_the_quantum_head(profiles):
+    res = load_catalogue()
+    d = make_policy("quantum_first", res).decide(split_w(privacy=False), ResourceState())
+    assert d.placement == Placement("edge_gpu", "qpu", split="embedding")
+    # Not private_ok (the placeholder digits embedding): it falls back as before.
+    d = make_policy("quantum_first", res).decide(split_w(profile="digits", privacy=True), ResourceState())
+    assert d.chosen.feasible and not d.placement.is_hybrid
+    assert make_policy("quantum_first", res).decide(make_workload("optimization", seed=0, n=6),
+                                                    ResourceState()).placement.label == "cloud_cpu+qpu"
+
+
 def fingerprint(ws) -> str:
     """Hash of every workload field the generator's random stream drives (classical_quality and
     gflop are left out: they also depend on CALIBRATION, which other tests load)."""
@@ -416,3 +496,32 @@ def test_simulator_runs_split_inference_when_asked():
     for policy in ("qedge_adaptive", "qedge_hedged", "random"):
         df = sim.run(policy, wl)
         assert len(df) == 60 and df.latency_s.ge(0).all()
+
+
+def test_simulator_frees_the_edge_front_once_its_share_of_a_split_is_done(profiles):
+    """A split holds the edge front for its front compute only, not for the upload after it."""
+    from qedge.orchestrator.policies import Decision, Policy
+    from qedge.simulation.simulator import Scenario, Simulator
+
+    class Fixed(Policy):
+        name = "fixed"
+
+        def decide(self, w, st):
+            p = Placement.parse(w.params["force"], self.resources)
+            e = self.model.estimate(w, p, st)
+            return Decision(w, p, e, [e], self.name)
+
+    cat = load_catalogue()
+    cat["edge_cpu"].slots = 1
+    sim = Simulator(Scenario("flat", "no noise", noise_sigma=1e-9), catalogue=cat, seed=0)
+    ws = []
+    for i, (t, force) in enumerate([(0.0, "edge_cpu>stem>cloud_gpu"), (0.5, "edge_cpu")]):
+        w = split_w(profile="t_camera", batch=32, privacy=False, deadline_s=100)
+        w.id, w.arrival_s, w.params["force"] = i, t, force
+        ws.append(w)
+    df = sim.run(Fixed(sim.nominal), ws)
+    model = CostModel(sim.nominal)
+    first = model.estimate(ws[0], Placement.parse("edge_cpu>stem>cloud_gpu"))
+    assert first.breakdown["transfer"] > 10 and first.breakdown["compute"] < 0.5   # 51 MB of stem activations
+    alone = model.estimate(ws[1], Placement("edge_cpu")).latency_s
+    assert df.latency_s.iloc[1] == pytest.approx(alone, rel=1e-6)    # no wait behind task 0's upload
