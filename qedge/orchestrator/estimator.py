@@ -3,30 +3,80 @@
 A *placement* is either purely classical (``Placement("edge_gpu")``) or hybrid
 (``Placement("cloud_cpu", "qpu")``), where the classical host runs the
 optimiser / SVM / post-processing and only circuit execution goes to the
-quantum resource. The same model is used by the scheduler (with the nominal,
-believed parameters) and by the simulator (with the true, hidden ones).
+quantum resource. For ``split_inference`` a placement can also cut the network
+(``Placement("edge_gpu", split="conv2", back="cloud_gpu")``, see split.py).
+The same model is used by the scheduler (with the nominal, believed
+parameters) and by the simulator (with the true, hidden ones).
 """
 from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
 
-from ..resources import RADIO_POWER_W, Resource, ResourceState
+from ..resources import DEFAULT_CATALOGUE, RADIO_POWER_W, Resource, ResourceState
 from ..workloads import Workload, kernel_quality, qaoa_quality
 
 
 @dataclass(frozen=True)
 class Placement:
+    """Where a workload runs.
+
+    ``Placement(r)``                      everything on r (a cloud r receives the raw input)
+    ``Placement(host, q)``                host runs the classical share, circuits go to q
+    ``Placement(front, split=c, back=b)`` front runs the network up to cut c and sends that
+                                          activation; cloud resource b runs the rest
+    ``Placement(front, q, split="embedding")``  front runs up to the embedding; the quantum
+                                          head runs on q (only the embedding is sent)
+
+    Labels: "edge_gpu", "cloud_cpu+qpu", "edge_gpu>conv2>cloud_gpu", "edge_gpu>embedding>qpu".
+    """
+
     classical: str
     quantum: str | None = None
+    split: str | None = None    # cut point (split_inference only)
+    back: str | None = None     # remote classical resource that runs the network after the cut
+
+    def __post_init__(self):
+        if self.back is not None and (self.split is None or self.quantum is not None):
+            raise ValueError("a back resource needs a split point and no quantum resource")
+        if self.split is not None and self.back is None and self.quantum is None:
+            raise ValueError(f"split at {self.split!r} needs a back resource or a quantum resource")
+        for part in (self.classical, self.quantum, self.split, self.back):
+            if part is not None and (not part or "+" in part or ">" in part):
+                raise ValueError(f"bad placement part {part!r}")
 
     @property
     def label(self) -> str:
+        if self.split is not None:
+            return f"{self.classical}>{self.split}>{self.back or self.quantum}"
         return self.classical if self.quantum is None else f"{self.classical}+{self.quantum}"
 
     @property
     def is_hybrid(self) -> bool:
         return self.quantum is not None
+
+    @classmethod
+    def parse(cls, label: str, resources: dict[str, Resource] | None = None) -> "Placement":
+        """Inverse of ``label``. In "front>cut>x" the last part is a quantum resource or a
+        classical back; which one is read from ``resources`` (default: the built-in catalogue),
+        and an unknown name there is an error rather than a guess."""
+        label = label.strip()
+        if ">" in label:
+            parts = label.split(">")
+            if len(parts) != 3 or not all(parts):
+                raise ValueError(f"split placement label must be front>cut>resource, got {label!r}")
+            front, cut, last = parts
+            if resources is not None:
+                if last not in resources:
+                    raise ValueError(f"unknown resource {last!r} in {label!r}")
+                quantum = resources[last].is_quantum
+            elif last in DEFAULT_CATALOGUE:
+                quantum = DEFAULT_CATALOGUE[last]["kind"] == "quantum"
+            else:
+                raise ValueError(f"unknown resource {last!r} in {label!r}; pass the catalogue")
+            return cls(front, last, split=cut) if quantum else cls(front, split=cut, back=last)
+        classical, _, quantum = label.partition("+")
+        return cls(classical, quantum or None)
 
 
 @dataclass
@@ -59,6 +109,9 @@ def transfer_time(r: Resource, up_mb: float, down_mb: float, rtt: float | None =
 
 
 def candidate_placements(w: Workload, resources: dict[str, Resource]) -> list[Placement]:
+    if w.kind == "split_inference":
+        from .split import candidate_split_placements
+        return candidate_split_placements(w, resources)
     classical = [n for n, r in resources.items() if not r.is_quantum and r.available]
     out = [Placement(n) for n in classical]
     if w.quantum_capable:
@@ -92,7 +145,8 @@ class CostModel:
         est.cost_usd += compute * r.cost_per_s
 
     # ---- quantum execution --------------------------------------------------
-    def _quantum(self, w: Workload, host: Resource, q: Resource, st: ResourceState, est: Estimate):
+    def _quantum(self, w: Workload, host: Resource, q: Resource, st: ResourceState, est: Estimate,
+                 check_privacy: bool = True):
         qp = w.quantum
         cal = st.qpu_figures.get(q.name)
         if cal and not q.sim_gflops:
@@ -107,7 +161,7 @@ class CostModel:
         if qp.n_qubits > q.max_qubits:
             est.feasible = False
             est.reasons.append(f"{qp.n_qubits} qubits > {q.max_qubits} on {q.name}")
-        if w.privacy:
+        if w.privacy and check_privacy:   # split_inference judges privacy per transmitted tensor
             est.feasible = False
             est.reasons.append("privacy: data may not leave the edge")
         # host <-> quantum service round trip, paid once per sequential round
@@ -136,6 +190,9 @@ class CostModel:
     # ---- public -------------------------------------------------------------
     def estimate(self, w: Workload, p: Placement, st: ResourceState | None = None) -> Estimate:
         st = st or ResourceState()
+        if w.kind == "split_inference":
+            from .split import estimate_split
+            return estimate_split(self, w, p, st)
         est = Estimate(p)
         host = self.resources[p.classical]
         if w.privacy and not host.is_edge:
@@ -163,4 +220,7 @@ class CostModel:
             return kernel_quality(fid)
         if w.kind == "quantum_simulation":
             return fid
+        if w.kind == "split_inference":
+            from .split import head_quality
+            return head_quality(w, fid)
         return 0.0

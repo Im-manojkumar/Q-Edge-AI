@@ -272,7 +272,8 @@ class Orchestrator:
                **params) -> Report:
         """Plan one workload, execute it for real, and report.
 
-        force       run this placement label (e.g. "cloud_cpu+qpu") instead of the decision.
+        force       run this placement label (e.g. "cloud_cpu+qpu", "edge_gpu>conv2>cloud_gpu")
+                    instead of the decision; parsed by ``Placement.parse``.
         race        if the executed placement sends circuits to the QPU, also run the best
                     feasible classical placement at the same time and deliver per ``_race``.
                     No effect on any other placement (the report says why).
@@ -285,8 +286,7 @@ class Orchestrator:
             params["deadline_s"] = deadline_s
         w, d = self.plan(kind, **params)
         if force:  # run a specific placement anyway, e.g. to compare against the decision
-            classical, _, quantum = force.partition("+")
-            p = Placement(classical, quantum or None)
+            p = Placement.parse(force, self.resources)
             est = next((e for e in d.estimates if e.placement == p), d.chosen)
             d = Decision(w, p, est, d.estimates, d.policy + " (forced)", d.quantum_checks)
         race_info = None
