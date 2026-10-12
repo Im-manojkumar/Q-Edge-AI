@@ -95,6 +95,9 @@ class RaceInfo:
     cancel_errors: list[str] = field(default_factory=list)
     classical_result: ExecResult | None = None
     quantum_result: ExecResult | None = None
+    # split_inference only: what the QPU path sends off the edge. That path starts in every
+    # race, so this has left the edge whichever result is delivered.
+    quantum_sent: str | None = None
 
     def wait_settled(self, timeout: float | None = None) -> bool:
         """Block until both race threads have ended and been recorded (an abandoned
@@ -132,6 +135,13 @@ class RaceInfo:
                 "quantum_error": self.quantum_error, "classical_error": self.classical_error}
 
     def summary(self) -> str:
+        out = self._summary()
+        if self.raced and self.quantum_sent and self.winner != "quantum":
+            out += (f"; the QPU path was started too and sends {self.quantum_sent} off the edge, so count "
+                    "that as having left it whatever was delivered")
+        return out
+
+    def _summary(self) -> str:
         if not self.raced:
             return f"race: {self.reason}"
         head = f"race vs {self.fallback} (deadline {self.deadline_s:.3g}s): "
@@ -188,7 +198,10 @@ class Report:
                          f"compute {r.compute_s:.3g}s, quantum {r.quantum_s:.3g}s, "
                          f"latency incl. modelled network {self.measured_latency_s:.3g}s")
             if r.kind == "split_inference":
-                lines.append("  " + split_summary(r.details))
+                line = split_summary(r.details)
+                if self.raced and self.winner == "classical":   # the QPU path's share is in the race line
+                    line = line.replace("split:", "split (the delivered classical fallback):", 1)
+                lines.append("  " + line)
         if self.race is not None:
             lines.append("  " + self.race.summary())
         if self.error:
@@ -313,7 +326,22 @@ class Orchestrator:
         deadline_s  the workload's deadline, passed to the workload builder exactly as
                     before; in a race it is also the wall-clock deadline from this call.
                     Defaults to the deadline the builder draws.
+
+        A split_inference race first loads the trained model (on a cold cache it is
+        trained: measured 27.6 s at k=4, 146 s at k=8), and the race clock starts after
+        that. Loading is setup, like importing the libraries; inside the race it would
+        hold both paths (the second waits on the first's training run, which cannot be
+        cancelled) and the fallback would arrive far past the deadline.
         """
+        if race and kind == "split_inference" and params.get("profile", "digits") == "digits":
+            prepare = getattr(self.executor, "prepare_split", None)   # absent on stand-in executors
+            if prepare is not None:
+                t0 = time.perf_counter()
+                try:
+                    prepare(int(params.get("k", split.DEFAULT_K)))
+                except Exception as e:   # e.g. k out of range: the run itself reports it
+                    log.warning("could not load the split model before the race: %s", e)
+                log.info("split model ready in %.3g s, before the race clock", time.perf_counter() - t0)
         t_submit = time.perf_counter()
         if deadline_s is not None:
             params["deadline_s"] = deadline_s
@@ -410,6 +438,8 @@ class Orchestrator:
         pool.shutdown(wait=False)  # never block on an abandoned QPU thread
 
         info = RaceInfo(raced=True, deadline_s=deadline, fallback=fallback.placement.label)
+        if w.kind == "split_inference":
+            info.quantum_sent = split.sent_text(w, d.placement, self.resources)
         wait([fq], timeout=max(0.0, t_deadline - time.perf_counter()))
         # Judge the QPU by when its thread finished, not by when this thread woke up: while
         # the emulator holds the GIL the wake-up can be late, and a result that landed in

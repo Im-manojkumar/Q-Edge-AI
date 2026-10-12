@@ -11,8 +11,14 @@ afterwards. The quantum head's circuit angles and readout are part of the file,
 so a reloaded model gives the same predictions as the one that was trained.
 
 * One file per (k, seed, quick): ``digits_k4_seed0.npz``. The file records the
-  training settings; if they no longer match the code's, the model is retrained
-  and the file replaced, so a stale cache cannot pass for the current model.
+  training settings and a hash of the source of ``data``, ``nets`` and
+  ``qhead`` (the data split, the network and training code, the quantum head's
+  circuit and readout). If either no longer matches, the model is retrained and
+  the file replaced. Any edit to those three files retrains, comments included
+  (a false alarm costs one training run; a missed change would serve weights
+  for a different circuit). Changes elsewhere are not detected: library
+  versions (numpy, autograd, scikit-learn's digits data) or edits to other
+  modules; delete ``results/models/`` after such a change.
 * The data split is always ``load_digits_split(0)`` (the split the profile is
   measured on); ``seed`` only fixes the initialisation and minibatch order.
 * ``quick=True`` trains with few epochs (``QUICK_BACKBONE`` / ``QUICK_HEAD``,
@@ -34,6 +40,7 @@ images) and the same quantum-head predictions.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -41,7 +48,7 @@ import time
 
 import numpy as np
 
-from . import nets
+from . import data as _data_mod, nets, qhead
 from .data import load_digits_split
 
 DATA_SEED = 0
@@ -55,11 +62,22 @@ _key_locks: dict[tuple, threading.Lock] = {}
 _models: dict[tuple, nets.TransferResult] = {}
 
 
+def code_hash() -> str:
+    """sha256 (first 16 hex digits) of the source of the modules that define the data split,
+    the network and its training, and the quantum head: a change there invalidates a model."""
+    h = hashlib.sha256()
+    for mod in (_data_mod, nets, qhead):
+        with open(mod.__file__, "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()[:16]
+
+
 def settings(quick: bool = False) -> dict:
-    """Everything that determines the trained weights besides k and the seed."""
+    """What determines the trained weights besides k and the seed, as far as it is checked:
+    the training settings and ``code_hash()`` (see the module docstring for what is not)."""
     return {"data_seed": DATA_SEED, "layers": LAYERS, "heads": list(nets.HEADS),
             "backbone_kw": dict(QUICK_BACKBONE if quick else nets.BACKBONE_FIT),
-            "head_kw": dict(QUICK_HEAD if quick else nets.HEAD_FIT)}
+            "head_kw": dict(QUICK_HEAD if quick else nets.HEAD_FIT), "code": code_hash()}
 
 
 def model_path(k: int, seed: int = 0, cache_dir: str = CACHE_DIR, quick: bool = False) -> str:
@@ -101,7 +119,7 @@ def get_model(k: int = 4, seed: int = 0, cache_dir: str = CACHE_DIR, quick: bool
             try:
                 tr, info = load(path)
                 if info.get("settings") != want or info.get("k") != int(k) or info.get("seed") != int(seed):
-                    tr = None       # trained with other settings: retrain
+                    tr = None       # trained with other settings or other code: retrain
             except (OSError, ValueError, KeyError) as e:   # unreadable cache: retrain over it
                 import logging
                 logging.getLogger(__name__).warning("model cache %s unreadable (%s); retraining", path, e)

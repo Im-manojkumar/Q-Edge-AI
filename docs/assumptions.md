@@ -170,7 +170,7 @@ model; measured so far it is level with or below the classical heads (see `qedge
 | Attacker | honest-but-curious remote party with same-distribution labelled images (the training split) | ridge, one-hidden-layer MLP and kNN-regression decoders, hyperparameters chosen on validation; the strongest per metric. Numbers hold "against these attacks" only |
 | Privacy rule (`private_ok`) | images re-identified that the label-only baseline does not (counted per image) <= 5 x chance, and r2 beyond the label <= 0.10 | policy thresholds, not a standard. Measured (seed 0, k = 2, 3, 4, 5, 6, 8): no cut passes, the embedding included, so private batches stay on the edge |
 | Shared cuts in the profile | sizes and front FLOPs from one backbone per k; leakage = the worst over k; private only if private for every k | conservative. The file stores `back_flop` at k = 4 (and every k under `back_flop_by_k`); the router recomputes it per k as total(k) - front |
-| Classical head of a k | linear or MLP, whichever has the higher validation accuracy | picking on test accuracy would be model selection on the test split |
+| Classical head of a k | linear or MLP, whichever has the higher validation accuracy (`classical_head`); the router costs and the executor runs that head (`head=best`) | picking on test accuracy would be model selection on the test split. The built-in placeholder profile names no head, so there `best` is the higher placeholder accuracy |
 | Packed QPU cost of the head | `packing_cost`: catalogue QPU figures, Braket-style per-task / per-shot prices | same assumptions as E7 |
 
 ## Split placements: the router (`qedge/orchestrator/split.py`)
@@ -195,8 +195,10 @@ defaults.
 
 | Figure / rule | Value | Basis |
 |---|---|---|
-| Model | the transfer-mode digits model for the workload's k, trained on first use with the default settings and cached in `results/models/` (not committed; a file whose training settings differ from the code's is retrained) | measured on this machine: k = 4 trains in 27.6 s (15.7 s of it the quantum head), k = 8 in 146 s (133 s); loading a cached model takes about 0.003 s |
+| Model | the transfer-mode digits model for the workload's k, trained on first use with the default settings and cached in `results/models/` (not committed; a file whose training settings or source hash of `data.py`, `nets.py`, `qhead.py` differ from the code's is retrained; library upgrades are not detected, so delete the folder after one) | measured on this machine: k = 4 trains in 27.6 s (15.7 s of it the quantum head), k = 8 in 146 s (133 s); loading a cached model takes about 0.003 s |
 | Images | `batch` test-split images drawn without replacement, seeded by the workload id | the quantum path and its race fallback see the same batch |
+| Race with a split | the model is loaded (trained on a cold cache) before the race clock starts; the report counts what the QPU path sends off the edge even when the classical fallback is delivered | loading is setup, not part of the request; the QPU path starts in every race, so its embedding has left the edge |
+| Forced placements | a forced split the cost model marks structurally invalid (front not on the edge, or back not a cloud classical resource) is refused, not run | what "left the edge" would mean nothing for it |
 | Where it runs | every classical part runs on this machine; the edge/cloud split is honoured (the remote part starts from the float32 tensor the edge would send) and the bytes are counted, but the transfer is modelled, not sent | as for every other kind |
 | Quantum head | `quantum_sim`: one circuit per image on the simulator stack; `qpu` on `ibm-auto` with batch > 1: packed, 8 images per job (idea 2's packing), else one circuit per image | hardware limits (`QEDGE_HW_MAX_CIRCUITS`, `QEDGE_HW_MAX_SHOTS`) apply before anything is submitted; the race token is checked before every job |
 | QPU seconds and price in a result | `packing_cost` figures (catalogue QPU timings, Braket-style prices) | modelled, not metered; labelled in the result |

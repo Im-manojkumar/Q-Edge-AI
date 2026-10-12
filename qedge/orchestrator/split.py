@@ -324,16 +324,26 @@ def load_profiles(path: str = "results/split_profile.json", keep: bool = False) 
     profile also updates what ``camera`` inherits, unless the file has its own camera
     profile. A missing file resets ``PROFILES`` to the defaults. With ``keep``, profiles
     registered at runtime under other names (not digits, camera or a name in the file)
-    stay registered; the orchestrator loads this way so it does not drop them."""
+    stay registered; the orchestrator loads this way so it does not drop them.
+
+    Any file that cannot be used (unreadable, not JSON, not a profile, a list or a dict of
+    profiles, or a profile that fails ``check_profile``) raises ValueError, so callers
+    have one error to catch to fall back to the built-in profiles."""
     extra = {n: p for n, p in PROFILES.items() if n not in ("digits", "camera")} if keep else {}
     measured: dict[str, dict] = {}
     if os.path.exists(path):
-        with open(path) as f:
-            data = json.load(f)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except OSError as e:    # e.g. a directory or an unreadable file at that path
+            raise ValueError(f"{path}: cannot read: {e}") from e
         if isinstance(data, dict) and "cuts" in data:
             items = [data]
-        else:
+        elif isinstance(data, (dict, list)):
             items = data if isinstance(data, list) else list(data.values())
+        else:
+            raise ValueError(f"{path}: expected a profile, a list of profiles or {{name: profile}}, "
+                             f"got {type(data).__name__}")
         for p in items:
             problems = check_profile(p)
             if problems:
@@ -465,7 +475,6 @@ def describe_placement(w: Workload, p: Placement, resources: dict[str, Resource]
     if resources is None:
         from ..resources import load_catalogue
         resources = load_catalogue()
-    prof, k, batch = get_profile(w.params["profile"]), int(w.params["k"]), int(w.params["batch"])
     sent = transmitted(p, resources)
     if not sent:
         return f"whole model on {p.classical}; nothing leaves the edge"
@@ -477,13 +486,20 @@ def describe_placement(w: Workload, p: Placement, resources: dict[str, Resource]
         where = f"{p.classical} runs up to {p.split}, {p.back} runs the rest"
     else:
         where = f"whole model on {p.classical}"
+    return f"{where}; leaves the edge: {sent_text(w, p, resources)}"
+
+
+def sent_text(w: Workload, p: Placement, resources: dict[str, Resource]) -> str:
+    """What leaves the edge under ``p``, in bytes per image and for the batch ("nothing" if
+    it all stays on the edge)."""
+    prof, k, batch = get_profile(w.params["profile"]), int(w.params["k"]), int(w.params["batch"])
     parts = []
-    for name in sent:
+    for name in transmitted(p, resources):
         nbytes = prof["input_bytes"] if name == "input" else cut_info(prof, name, k)["bytes"]
         what = ("the raw input" if name == "input" else f"the {k}-number embedding" if name == "embedding"
                 else f"the {name} activation")
         parts.append(f"{what} ({nbytes:,} B per image, {nbytes * batch:,} B for {batch})")
-    return f"{where}; leaves the edge: {', '.join(parts)}"
+    return ", ".join(parts) or "nothing"
 
 
 def _pct(x: float) -> str:
@@ -548,6 +564,20 @@ def privacy_verdict(w: Workload, p: Placement, resources: dict[str, Resource]) -
 # Cost
 # ---------------------------------------------------------------------------
 
+def shape_problem(p: Placement, resources: dict[str, Resource]) -> str | None:
+    """Why ``p`` is not a split this model can describe, or None. Shared by the cost model
+    (such a placement is infeasible) and the executor (it refuses to run one, since what
+    "left the edge" would be meaningless, e.g. an edge-to-edge back)."""
+    cut = p.split or "embedding"
+    if p.quantum is not None and cut != "embedding":
+        return f"the quantum head takes the embedding, not {cut}"
+    if p.back is not None:
+        front, back = resources[p.classical], resources[p.back]
+        if not front.is_edge or back.is_edge or back.is_quantum:
+            return "a split runs its front on an edge resource and its back on a cloud classical resource"
+    return None
+
+
 def estimate_split(model: CostModel, w: Workload, p: Placement, st: ResourceState) -> Estimate:
     """Latency, energy, money and quality of ``p`` for a split_inference workload.
 
@@ -573,11 +603,7 @@ def estimate_split(model: CostModel, w: Workload, p: Placement, st: ResourceStat
         return est
     cut = p.split or "embedding"
     back = res[p.back] if p.back is not None else None
-    bad = None
-    if p.quantum is not None and cut != "embedding":
-        bad = f"the quantum head takes the embedding, not {cut}"
-    elif back is not None and (not front.is_edge or back.is_edge or back.is_quantum):
-        bad = "a split runs its front on an edge resource and its back on a cloud classical resource"
+    bad = shape_problem(p, res)
     if bad is None:
         try:
             c = cut_info(prof, cut, k)

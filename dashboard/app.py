@@ -171,7 +171,18 @@ with tabs[0]:
             if r.fallback_from:
                 st.warning(f"{r.fallback_from} is not configured, so the QPU path ran on {r.backend}.")
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric(r.quality_metric, f"{r.quality:.3f}", f"{r.quality - rep.decision.chosen.quality:+.3f} vs predicted")
+            pred = rep.decision.chosen.quality
+            if r.kind == "split_inference":
+                # The prediction for a split is the profile's accuracy: only worth comparing with
+                # when that accuracy was measured, not a placeholder or an inherited figure.
+                wprof = split.get_profile(rep.workload.params["profile"])
+                ent = split.embedding(wprof, rep.workload.params["k"])
+                if not str(ent.get("source", wprof["source"])).startswith("measured"):
+                    pred = None
+            m1.metric(r.quality_metric, f"{r.quality:.3f}",
+                      f"{r.quality - pred:+.3f} vs predicted" if pred is not None else None,
+                      help=None if pred is not None else "no comparison: the predicted accuracy is a placeholder, "
+                                                          "not a measurement")
             m2.metric("latency (s)", f"{rep.measured_latency_s:.3g}")
             m3.metric("quantum time (s)", f"{r.quantum_s:.3g}")
             m4.metric("ran on", where)
@@ -205,14 +216,19 @@ with tabs[1]:
         st.markdown("**Test accuracy per head and embedding size k**")
         st.dataframe(acc[["k", "linear", "mlp", "quantum", "quantum_l0", "source"]], hide_index=True)
     with a2:
+        # Only measured (or, for camera, inherited) rows are plotted: a placeholder drawn as a
+        # test-accuracy line reads as a result even with a warning next to it.
         placeholder = acc["source"] == split.PLACEHOLDER_NOTE
-        long = acc[~placeholder | placeholder.all()].melt(id_vars="k", value_vars=["linear", "mlp", "quantum", "quantum_l0"], var_name="head",
-                        value_name="accuracy")
-        long["accuracy"] = pd.to_numeric(long["accuracy"], errors="coerce")
-        figa = px.line(long, x="k", y="accuracy", color="head", markers=True, color_discrete_sequence=PALETTE,
-                       height=260)
-        figa.update_layout(margin=dict(l=0, r=0, t=10, b=0), yaxis_title="test accuracy")
-        st.plotly_chart(figa, width="stretch")
+        if placeholder.all():
+            st.info("No accuracy chart: every row is a built-in placeholder, not a measurement.")
+        else:
+            long = acc[~placeholder].melt(id_vars="k", value_vars=["linear", "mlp", "quantum", "quantum_l0"],
+                                          var_name="head", value_name="accuracy")
+            long["accuracy"] = pd.to_numeric(long["accuracy"], errors="coerce")
+            figa = px.line(long, x="k", y="accuracy", color="head", markers=True, color_discrete_sequence=PALETTE,
+                           height=260)
+            figa.update_layout(margin=dict(l=0, r=0, t=10, b=0), yaxis_title="test accuracy")
+            st.plotly_chart(figa, width="stretch")
     if placeholder.any() and not placeholder.all():
         st.caption(f"k = {', '.join(str(k) for k in acc.k[placeholder])} not measured: those rows keep the built-in "
                    "placeholders and are left out of the chart.")
@@ -300,7 +316,9 @@ with tabs[1]:
             st.markdown(f"`{os.path.basename(f)}`")
             st.image(f)
     else:
-        st.caption("No E8 figures yet: run `python -m qedge experiments --only e8`.")
+        st.caption("No E8 figures yet. Experiment E8 writes them (figures/e8_*.png) with "
+                   "`python -m qedge experiments --only e8` once E8 is part of run_all; until then that "
+                   "command stops with \"unknown experiment step\".")
 
 # ---------------------------------------------------------------- simulation
 with tabs[2]:

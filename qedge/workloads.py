@@ -239,8 +239,10 @@ def make_qsim(i, rng, **kw) -> Workload:
 def make_split_inference(i, rng, **kw) -> Workload:
     """A batch of images through a split model (profile "digits" or "camera", embedding size k).
 
-    head    classical head that classical placements serve: "best" (highest accuracy for k),
-            "linear" or "mlp"
+    head    classical head that classical placements serve: "best", "linear" or "mlp". "best"
+            is the profile's ``classical_head`` for k (a measured profile picks it on
+            validation accuracy, see ``qedge.ml.profile``); a profile without one (the
+            built-in placeholders) falls back to the higher of its listed accuracies
     qhead   "quantum" (the trained circuit) or "quantum_l0" (the L=0 ablation: encoding and
             readout only)
 
@@ -260,7 +262,11 @@ def make_split_inference(i, rng, **kw) -> Workload:
     head, qhead = str(kw.get("head", "best")), str(kw.get("qhead", "quantum"))
     acc = e["accuracy"]
     if head == "best":
-        head = max(split.HEADS, key=lambda h: acc[h])
+        # Never re-pick on the profile's accuracies when it names a head: those are test
+        # accuracies, and choosing by them would be model selection on the test split.
+        head = e.get("classical_head")
+        if head not in split.HEADS:
+            head = max(split.HEADS, key=lambda h: acc[h])
     if head not in split.HEADS or qhead not in split.QHEADS:
         raise ValueError(f"head must be best/{'/'.join(split.HEADS)}, qhead {'/'.join(split.QHEADS)}")
     qc = split.routed_circuit(e["quantum_circuit"] if qhead == "quantum" else split.head_circuit_stats(k, 0))

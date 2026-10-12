@@ -152,7 +152,7 @@ def _split(a):
         try:
             split.load_profiles(keep=True)
         except ValueError as e:
-            sys.exit(f"results/split_profile.json does not match the split profile schema: {e}")
+            sys.exit(f"results/split_profile.json cannot be used (not read, or not a split profile): {e}")
         names = [a.name] if a.name else list(split.PROFILES)
         for name in names:
             print(profile_text(split.get_profile(name)))

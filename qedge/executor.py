@@ -238,6 +238,12 @@ class Executor:
                           "1 - |error| in <Z>", 0.0, r.wall_time_s, be.name, getattr(be, "fallback_from", None),
                           {"n": n, "steps": steps, "magnetisation": m, "exact": exact})
 
+    def prepare_split(self, k: int):
+        """Load the trained split model for embedding size ``k`` (training it on a cold cache),
+        so that a later run, or a race, does not spend its time on it."""
+        from .ml import zoo
+        return zoo.get_model(int(k), cache_dir=self.model_cache, quick=self.quick_models)
+
     def _split_inference(self, w, q, cancel=None, placement=None):
         """A batch of test images through the trained split model, cut as ``placement`` says.
 
@@ -274,8 +280,9 @@ class Executor:
         res = self.resources or load_catalogue()
         sent = split.transmitted(placement, res)
         cut = placement.split or ("embedding" if q else None)
-        if q is not None and cut != "embedding":
-            raise ValueError(f"the quantum head takes the embedding, not {cut}")
+        bad = split.shape_problem(placement, res)   # the cost model marks these infeasible; force must not run them
+        if bad is not None:
+            raise ValueError(f"cannot run {placement.label}: {bad}")
 
         tr = zoo.get_model(k, cache_dir=self.model_cache, quick=self.quick_models)
         Xte, yte = zoo.data()[4], zoo.data()[5]

@@ -422,6 +422,42 @@ def test_load_profiles_merges_measured_over_defaults(tmp_path, restore_profiles)
     assert split.load_profiles(str(tmp_path / "missing.json")) == split._defaults()
 
 
+def test_best_head_is_the_profiles_validation_choice_not_the_test_argmax(restore_profiles):
+    """A measured profile names the classical head picked on validation accuracy; "best" must
+    use it even where the other head has the higher (test) accuracy, as at k = 3 and 8 in the
+    round-1 measurement. Without a named head (placeholders) the higher accuracy is used."""
+    prof = copy.deepcopy(split.get_profile("digits"))
+    e = prof["embedding"]["4"]
+    e["accuracy"] = {"linear": 0.97, "mlp": 0.96, "quantum": 0.92, "quantum_l0": 0.96}
+    e.update(classical_head="mlp", classical_accuracy=0.96, classical_selected_on="validation")
+    split.PROFILES["digits"] = prof
+    w = make_workload("split_inference", seed=0, k=4, batch=2)
+    assert w.params["head"] == "mlp" and w.classical_quality == 0.96 and w.classical_method == "split CNN, mlp head"
+    assert make_workload("split_inference", seed=0, k=4, batch=2, head="linear").classical_quality == 0.97
+    del e["classical_head"]
+    assert make_workload("split_inference", seed=0, k=4, batch=2).params["head"] == "linear"
+
+
+@pytest.mark.parametrize("content", ['"oops"', "null", "3", "{bad json", None])
+def test_an_unusable_profile_file_is_ignored_with_a_warning(content, tmp_path, monkeypatch, restore_profiles, caplog):
+    """Anything at results/split_profile.json that is not a profile file (a JSON string, null,
+    a number, broken JSON, a directory) raises ValueError from load_profiles, so the
+    orchestrator keeps the built-in profiles instead of crashing."""
+    from qedge.orchestrator.engine import Orchestrator
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "results").mkdir()
+    path = tmp_path / "results" / "split_profile.json"
+    if content is None:
+        path.mkdir()                     # a directory where the file should be
+    else:
+        path.write_text(content)
+    with pytest.raises(ValueError):
+        split.load_profiles(str(path))
+    Orchestrator(log_path=None)
+    assert "ignoring results/split_profile.json" in caplog.text
+    assert split.PROFILES["digits"] == split.digits_default()
+
+
 def test_workload_fields_come_from_the_profile(profiles):
     w = split_w(batch=8, k=4, shots=500)
     assert w.kind == "split_inference" and w.quantum_capable

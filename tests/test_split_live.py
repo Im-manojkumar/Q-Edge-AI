@@ -127,6 +127,12 @@ def test_zoo_trains_once_under_concurrency_and_retrains_on_new_settings(quick_ca
     zoo.clear_memory()
     monkeypatch.setattr(zoo, "QUICK_HEAD", {**zoo.QUICK_HEAD, "epochs": 11})
     assert zoo.get_model(4, cache_dir=cache, quick=True).model.meta["zoo"] == "trained" and len(calls) == 2
+    # Nor is one trained by other code (data split, network, quantum head circuit).
+    zoo.clear_memory()
+    assert zoo.get_model(4, cache_dir=cache, quick=True).model.meta["zoo"] == "loaded" and len(calls) == 2
+    zoo.clear_memory()
+    monkeypatch.setattr(zoo, "code_hash", lambda: "0" * 16)
+    assert zoo.get_model(4, cache_dir=cache, quick=True).model.meta["zoo"] == "trained" and len(calls) == 3
     zoo.clear_memory()
 
 
@@ -279,15 +285,70 @@ def test_race_quantum_head_split_falls_back_to_its_own_classical_placement(live,
         q = r.quantum_result.details
         assert q["placement"] == "edge_gpu>embedding>qpu" and q["cut"] == "embedding"
         assert q["images"] == rep.result.details["images"]                         # same batch on both paths
+    # The delivered fallback kept everything on the edge, but the QPU path sent the embedding:
+    # the report must not say that nothing left the edge without saying that.
+    text = rep.explain()
+    assert "split (the delivered classical fallback): whole model on the edge; nothing left it" in text
+    assert ("the QPU path was started too and sends the 4-number embedding (16 B per image, 64 B for 4) "
+            "off the edge") in text
+    assert r.quantum_sent == "the 4-number embedding (16 B per image, 64 B for 4)"
     # A fast QPU wins and delivers the quantum head's answer.
     o.executor._backends[o.executor.qpu_stack] = FakeQPU(delay=0.0)
     rep = o.submit("split_inference", force="edge_gpu>embedding>qpu", race=True, deadline_s=30, k=4, batch=4,
                    privacy=False)
     assert rep.winner == "quantum" and rep.result.details["placement"] == "edge_gpu>embedding>qpu"
     assert rep.race.wait_settled(10) and rep.race.classical_result.details["placement"] == rep.race.fallback
+    assert "the QPU path was started too" not in rep.explain()                     # its own split line says it
+
+
+def test_race_loads_a_cold_model_before_the_clock_starts(live, tmp_path, monkeypatch):
+    """On a cold cache the model is trained (stubbed here: 1.5 s, then the quick model). That
+    happens before the race clock, so the fallback is still delivered at the 0.6 s deadline."""
+    tr = live
+    calls = []
+
+    def slow_train(data, k, **kw):
+        calls.append(k)
+        time.sleep(1.5)
+        return nets.TransferResult(copy.deepcopy(tr.model), tr.heads, tr.fits, tr.backbone_fit)
+
+    monkeypatch.setattr(nets, "train_transfer", slow_train)
+    monkeypatch.setattr(Executor, "model_cache", str(tmp_path / "cold"))
+    o = Orchestrator(log_path=str(tmp_path / "log.jsonl"))
+    o.executor._backends[o.executor.qpu_stack] = FakeQPU(delay=3.0)
+    rep = o.submit("split_inference", force="edge_gpu>embedding>qpu", race=True, deadline_s=0.6, k=4, batch=4,
+                   privacy=False)
+    assert calls == [4] and rep.raced and rep.winner == "classical" and rep.error is None
+    assert rep.race.delivered_s < 1.2                     # with training inside the race: > 1.5 s
+    assert rep.result.details["model"]["source"] == "trained"
+    zoo.clear_memory()
+
+
+def test_split_shapes_the_cost_model_rejects_are_not_run(live, tmp_path):
+    """Placement.parse accepts these labels, and force skips the decision, but the executor
+    refuses them: an edge-to-edge split sends nothing off the edge, and a split with a cloud
+    front would report a cut that never happened."""
+    o = Orchestrator("qedge_static", log_path=str(tmp_path / "log.jsonl"))
+    for label in ("edge_gpu>conv2>edge_cpu", "cloud_cpu>conv2>cloud_gpu"):
+        rep = o.submit("split_inference", force=label, k=4, batch=3, privacy=False)
+        assert not rep.decision.chosen.feasible
+        assert rep.result is None and "cannot run " + label in rep.error
+        assert "front on an edge resource and its back on a cloud classical resource" in rep.error
+    with pytest.raises(ValueError, match="takes the embedding"):
+        run(Executor(), split_w(), "edge_gpu>conv2>qpu")
 
 
 # ---------------------------------------------------------------- CLI
+def test_experiments_refuse_an_unknown_step_before_writing_anything(tmp_path):
+    """An unknown step (as `experiments --only e8` was before E8 joined run_all) used to run
+    nothing and still rewrite run_meta.json and every figure."""
+    from qedge.experiments import run_all
+    out, fig = tmp_path / "results", tmp_path / "figures"
+    with pytest.raises(SystemExit, match="unknown experiment step"):
+        run_all.main(only=["e99"], out_dir=str(out), fig_dir=str(fig))
+    assert not out.exists() and not fig.exists()
+
+
 def test_cli_split_plan_lists_every_candidate(capsys):
     saved = copy.deepcopy(split.PROFILES)
     try:
