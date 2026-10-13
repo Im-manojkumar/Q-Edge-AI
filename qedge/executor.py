@@ -91,6 +91,17 @@ def representative_circuit(w):
         return kernel_circuit(x, x[::-1])
     if w.kind == "quantum_simulation":
         return tfim_trotter(int(p["n"]), int(p["steps"]))
+    if w.kind == "ground_state":
+        from .quantum.vqe import ansatz, hamiltonian_for, measurement_groups, n_params, with_basis
+        H, n = hamiltonian_for(p["model"], int(p["n"]))
+        layers = int(p.get("layers", 1))
+        return with_basis(ansatz(n, [0.3] * n_params(n, layers), layers), measurement_groups(H)[-1])
+    if w.kind == "scheduling":
+        from .quantum.scheduling import ising_qaoa_circuit, scheduling_instance
+        inst = scheduling_instance(int(p["n"]), p.get("density", 0.3), seed=w.id)
+        J, h, _ = inst.ising()
+        reps = int(p.get("p", 1))
+        return ising_qaoa_circuit(inst.n, J, h, [0.4] * reps, [0.3] * reps)
     raise ValueError(f"{w.kind} has no quantum circuit")
 
 
@@ -214,3 +225,59 @@ class Executor:
         return ExecResult("quantum_simulation", "hybrid", "Trotter circuit", float(max(0.0, 1 - abs(m - exact))),
                           "1 - |error| in <Z>", 0.0, r.wall_time_s, be.name, getattr(be, "fallback_from", None),
                           {"n": n, "steps": steps, "magnetisation": m, "exact": exact})
+
+    def _ground_state(self, w, q, cancel=None):
+        from .quantum.vqe import (CHEMICAL_ACCURACY, energy_quality, hamiltonian_for, measurement_groups,
+                                  n_params, run_vqe, spectrum_bounds, vqe_budget)
+        model, layers = w.params["model"], int(w.params.get("layers", 1))
+        H, n = hamiltonian_for(model, int(w.params["n"]))
+        if n > 14:
+            raise ValueError("live execution keeps ground_state at <= 14 qubits so it can be verified exactly")
+        t0 = time.perf_counter()
+        e0, emax = spectrum_bounds(H, n)
+        t_exact = time.perf_counter() - t0
+        info = {"model": model, "n": n, "exact_energy": e0}
+        if q is None:
+            return ExecResult("ground_state", "classical", "exact diagonalisation", 1.0, "energy quality", t_exact,
+                              details={**info, "energy": e0})
+        be = self.backend_for(q, cancel)
+        groups, k = len(measurement_groups(H)), n_params(n, layers)
+        sweeps, starts, shots = (5, 4, 2000) if not be.hardware else (3, 2, 1000)
+        if be.hardware:  # fit the hardware circuit cap: fewer sweeps for bigger ansatzes
+            while sweeps > 1 and vqe_budget(k, groups, sweeps, starts)[0] > HW_MAX_CIRCUITS:
+                sweeps -= 1
+        self._guard(be, vqe_budget(k, groups, sweeps, starts)[0], shots)
+        r = run_vqe(be, H, n, layers, shots=shots, sweeps=sweeps, n_starts=starts, seed=w.id)
+        err = r.energy - e0
+        details = {**info, "energy": r.energy, "error": err, "circuit_evals": r.n_circuit_evals, "jobs": r.n_jobs,
+                   "sweeps": sweeps}
+        if model == "h2":
+            details["chemical_accuracy"] = abs(err) <= CHEMICAL_ACCURACY
+        return ExecResult("ground_state", "hybrid", "VQE", energy_quality(r.energy, e0, emax), "energy quality",
+                          r.classical_time_s, r.quantum_time_s, be.name, getattr(be, "fallback_from", None), details)
+
+    def _scheduling(self, w, q, cancel=None):
+        from .quantum.scheduling import run_scheduling_qaoa, scheduling_annealing, scheduling_instance
+        n = int(w.params["n"])
+        inst = scheduling_instance(n, w.params.get("density", 0.3), seed=w.id)
+        if n > 20:
+            raise ValueError("live execution keeps scheduling at <= 20 tasks so it can be verified exactly")
+        t0 = time.perf_counter()
+        opt_bits, opt = inst.optimum()
+        t_exact = time.perf_counter() - t0
+        info = {"n": n, "pairs_communicating": len(inst.comm), "optimum": opt}
+        if q is None:
+            return ExecResult("scheduling", "classical", "exact enumeration", 1.0, "optimum / cost", t_exact,
+                              details={**info, "cost": opt, "assignment": opt_bits})
+        be = self.backend_for(q, cancel)
+        iters = 8 if be.hardware else 25
+        shots = 512 if be.hardware else 1000
+        self._guard(be, 12 + iters + 1, shots)
+        t0 = time.perf_counter()
+        r = run_scheduling_qaoa(be, inst, p=int(w.params.get("p", 1)), shots=shots, maxiter=iters, seed=w.id)
+        dt = time.perf_counter() - t0
+        return ExecResult("scheduling", "hybrid", "QAOA", opt / r.best_cost if r.best_cost > 0 else 1.0,
+                          "optimum / cost", r.classical_time_s, r.quantum_time_s, be.name,
+                          getattr(be, "fallback_from", None),
+                          {**info, "cost": r.best_cost, "expected_cost": r.expected_cost, "assignment": r.best_bits,
+                           "circuit_evals": r.n_circuit_evals, "jobs": r.n_jobs, "wall_s": dt})

@@ -1,14 +1,16 @@
 """AI workloads, their profiles, and a synthetic workload generator.
 
-Five workload kinds cover the spectrum the project asks about:
+Seven workload kinds cover the spectrum the project asks about:
 
   inference            classical only (CNN-style batch inference)
   training             classical only (on-device fine-tuning)
   optimization         MaxCut-style combinatorial problem: classical solver, or hybrid QAOA
   kernel_classification small-data classifier: RBF-SVM, or hybrid quantum-kernel SVM
   quantum_simulation   spin-chain dynamics: classical state vector / MPS, or run natively on a QPU
+  ground_state         lowest energy of H2 or a spin chain: exact diagonalisation / DMRG, or hybrid VQE
+  scheduling           edge/cloud task assignment (a QUBO): exact search / annealing, or hybrid QAOA
 
-Only the last three have a quantum formulation; the orchestrator never sends
+Only the last five have a quantum formulation; the orchestrator never sends
 the first two to a QPU.
 """
 from __future__ import annotations
@@ -18,8 +20,9 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
-KINDS = ["inference", "training", "optimization", "kernel_classification", "quantum_simulation"]
-QUANTUM_CAPABLE = {"optimization", "kernel_classification", "quantum_simulation"}
+KINDS = ["inference", "training", "optimization", "kernel_classification", "quantum_simulation",
+         "ground_state", "scheduling"]
+QUANTUM_CAPABLE = {"optimization", "kernel_classification", "quantum_simulation", "ground_state", "scheduling"}
 
 
 @dataclass
@@ -86,6 +89,16 @@ CALIBRATION = {
     "kernel_acc": {"quantum": 0.86, "rbf": 0.90},
     "mps_chi_max": 1024,
     "entanglement_bits_per_step": 0.5,
+    # VQE (RY ansatz, Rotosolve), noiseless energy quality 1 - (E - E0)/(Emax - E0) by qubit count,
+    # and what DMRG reaches on 1D chains too large for exact diagonalisation (fitted in E8).
+    "vqe_quality": {"slope": -0.01, "at": 2, "value": 0.995, "floor": 0.85},
+    "dmrg_quality": 0.999,
+    # Scheduling QUBO: best-of-shots optimum/cost of uniform random sampling by task count, and how
+    # much noiseless QAOA(p=1) adds over random sampling with the same number of samples (E8 measured
+    # none); simulated annealing quality (fitted in E8).
+    "sched_random": {"slope": -0.03, "at": 10, "value": 1.0, "floor": 0.1},
+    "sched_qaoa_advantage": 0.0,
+    "sched_sa": {"slope": 0.0, "at": 10, "value": 1.0, "floor": 0.9},
 }
 
 
@@ -143,6 +156,16 @@ def sa_quality(n: int) -> float:
 def kernel_quality(fidelity: float = 1.0, n_classes: int = 2) -> float:
     acc = CALIBRATION["kernel_acc"]["quantum"]
     return fidelity * acc + (1 - fidelity) * (1 / n_classes)
+
+
+def vqe_quality(n: int, fidelity: float = 1.0) -> float:
+    """Noise pulls the VQE energy toward the fully mixed state, which scores ~0.5 on both models."""
+    return fidelity * _lin(CALIBRATION["vqe_quality"], n) + (1 - fidelity) * 0.5
+
+
+def scheduling_quality(n: int, fidelity: float = 1.0) -> float:
+    """Uniform random sampling plus QAOA's measured advantage over it; noise removes the advantage."""
+    return min(1.0, _lin(CALIBRATION["sched_random"], n) + fidelity * CALIBRATION.get("sched_qaoa_advantage", 0.0))
 
 
 def tfim_mps(n: int, steps: int) -> tuple[float, float]:
@@ -233,8 +256,56 @@ def make_qsim(i, rng, **kw) -> Workload:
                     min_quality=float(kw.get("min_quality", 0.5)), quantum=qp, params={"n": n, "steps": steps})
 
 
+def make_ground_state(i, rng, **kw) -> Workload:
+    """VQE workload. model=h2 (2 qubits, the hydrogen molecule) or model=tfim with n spins."""
+    from .quantum.vqe import hamiltonian_for, measurement_groups, n_params, vqe_budget
+    model = str(kw.get("model", "tfim" if "n" in kw else rng.choice(["h2", "tfim"])))
+    n_req = int(kw.get("n", rng.integers(4, 40))) if model == "tfim" else 2
+    layers = int(kw.get("layers", 1))
+    H, n = hamiltonian_for(model, n_req)
+    groups = len(measurement_groups(H))
+    k = n_params(n, layers)
+    circuits, jobs = vqe_budget(k, groups)
+    if n <= 20:
+        # Lanczos on a sparse matrix with ~n nonzeros per row, ~100 matrix-vector products
+        method, gflop, quality, mem = "exact_diagonalisation", 100 * 2 ** n * (n + 1) * 8e-9, 1.0, 3 * 16 * 2 ** n / 1e9
+    else:
+        # 1D chain: DMRG at bond dimension ~64, a few sweeps
+        method, gflop, quality, mem = "dmrg", 10 * n * 64 ** 3 * 4 * 8e-9, CALIBRATION["dmrg_quality"], 0.1
+    qp = QuantumProfile(n_qubits=n, depth=2 + layers * n, n_1q=k + n, n_2q=layers * (n - 1),
+                        n_circuits=circuits, shots=1000, n_rounds=jobs, algorithm=f"VQE(RY x{layers}, Rotosolve)")
+    return Workload(i, "ground_state", deadline_s=float(kw.get("deadline_s", rng.uniform(10, 1800))),
+                    data_mb=1e-3, result_mb=1e-4, privacy=False, gflop=gflop, memory_gb=mem, parallel=False,
+                    classical_method=method, classical_quality=quality,
+                    min_quality=float(kw.get("min_quality", 0.8)), quantum=qp,
+                    params={"model": model, "n": n, "layers": layers})
+
+
+def make_scheduling(i, rng, **kw) -> Workload:
+    """QAOA workload: assign n tasks to edge or cloud (load balance + split traffic + upload cost)."""
+    n = int(kw.get("n", rng.integers(6, 40)))
+    density = float(kw.get("density", 0.3))
+    p = int(kw.get("p", 1))
+    n_pairs = n * (n - 1) // 2  # the load-balance term couples every pair of tasks
+    if n <= 20:
+        method, gflop, quality = "exact", (2 ** n) * (n + density * n_pairs) * 4e-9, 1.0
+    else:
+        method, gflop, quality = "simulated_annealing", 2000 * n * n * 50e-9, _lin(CALIBRATION["sched_sa"], n)
+    routing = 1 + 0.25 * (n - 1)  # all-to-all couplings need many SWAPs on sparse hardware
+    iters = 25
+    qp = QuantumProfile(n_qubits=n, depth=int(p * (n + 2) * routing) + 1, n_1q=n + 2 * n * p,
+                        n_2q=int(n_pairs * p * routing), n_circuits=12 + iters, shots=1000,
+                        n_rounds=1 + iters, algorithm=f"QAOA scheduling (p={p})")
+    return Workload(i, "scheduling", deadline_s=float(kw.get("deadline_s", rng.uniform(2, 600))),
+                    data_mb=n * 1e-5, result_mb=1e-4, privacy=False, gflop=gflop,
+                    memory_gb=0.01 + 2 ** min(n, 22) * n * 1e-9, parallel=False, classical_method=method,
+                    classical_quality=quality, min_quality=float(kw.get("min_quality", 0.8)), quantum=qp,
+                    params={"n": n, "density": density, "p": p})
+
+
 BUILDERS = {"inference": make_inference, "training": make_training, "optimization": make_optimization,
-            "kernel_classification": make_kernel, "quantum_simulation": make_qsim}
+            "kernel_classification": make_kernel, "quantum_simulation": make_qsim,
+            "ground_state": make_ground_state, "scheduling": make_scheduling}
 
 DEFAULT_MIX = {"inference": 0.45, "training": 0.10, "optimization": 0.2,
                "kernel_classification": 0.15, "quantum_simulation": 0.10}

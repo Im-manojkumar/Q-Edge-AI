@@ -452,7 +452,7 @@ Absolute error in average magnetisation vs exact:
 | 12 | 5 | 0.000 | - | 0.003 | 0.010 |
 | 12 | 10 | 0.000 | - | 0.004 | 0.009 |
 
-Calibration written for the cost model: `{"qaoa_gain": {"a": 1.7478396420712126, "b": 1.0103692179236266}, "opt_c": 0.554034699612686, "sa_ratio": {"slope": 0.0, "at": 8, "value": 1.0, "floor": 0.95}, "kernel_acc": {"quantum": 0.8083333333333333, "rbf": 0.9041666666666667}}`
+Calibration written for the cost model: `{"qaoa_gain": {"a": 1.7478396420712126, "b": 1.0103692179236266}, "opt_c": 0.554034699612686, "sa_ratio": {"slope": 0.0, "at": 8, "value": 1.0, "floor": 0.95}, "kernel_acc": {"quantum": 0.8083333333333333, "rbf": 0.9041666666666667}, "vqe_quality": {"slope": -0.00226845393672063, "at": 2, "value": 0.9956664771862939, "floor": 0.85}, "sched_random": {"slope": -0.014487121616236158, "at": 10, "value": 1.0, "floor": 0.1}, "sched_sa": {"slope": 0.0, "at": 10, "value": 1.0, "floor": 0.9}, "sched_qaoa_advantage": 0.0}`
 
 ## A5. Policy comparison (E3)
 
@@ -764,4 +764,65 @@ How late a timed 50 ms wait wakes up (ms), idle vs while the emulator runs in an
 | idle | 60 | 0.1677 | 0.3827 | 0.639 |
 
 ![](figures/e7_race.png)
+
+## A12. VQE ground-state energy (E8)
+
+Energy quality = 1 - (E - E0)/(Emax - E0): 1 at the exact ground state, about 0.5 for a fully mixed (pure noise) state. Mean over seeds:
+
+| model | n | exact_diagonalisation | vqe_cobyla_noiseless | vqe_ibm_emulator | vqe_noiseless | vqe_noisy |
+|---|---|---|---|---|---|---|
+| h2 | 2 | 1.0000 | 0.9199 | 0.8905 | 0.9957 | 0.9987 |
+| tfim | 4 | 1.0000 | 0.9556 | 0.9035 | 0.9816 | 0.9804 |
+| tfim | 6 | 1.0000 | 0.9594 | - | 0.9839 | 0.9813 |
+| tfim | 8 | 1.0000 | 0.9315 | - | 0.9860 | 0.9743 |
+| tfim | 10 | 1.0000 | 0.9080 | - | 0.9708 | 0.9719 |
+
+H2 error in mHa (chemical accuracy is 1.6 mHa):
+
+| method | mean | min | max |
+|---|---|---|---|
+| vqe_cobyla_noiseless | 130.73 | 23.06 | 340.50 |
+| vqe_ibm_emulator | 178.80 | 178.80 | 178.80 |
+| vqe_noiseless | 6.71 | -1.08 | 17.22 |
+| vqe_noisy | 1.33 | -2.15 | 6.27 |
+
+H2 with VQE on every stack:
+
+| stack | model | energy | error_mHa | quality | circuit_evals | time_s |
+|---|---|---|---|---|---|---|
+| qiskit | h2 | -1.8620 | -4.6842 | 1.0000 | 90 | 2.1009 |
+| pennylane | h2 | -1.8610 | -3.6950 | 1.0000 | 90 | 0.9769 |
+| cirq | h2 | -1.8554 | 1.8713 | 0.9989 | 90 | 1.3371 |
+| braket-local | h2 | -1.8586 | -1.3742 | 1.0000 | 90 | 3.3965 |
+
+![](figures/e8_vqe.png)
+
+## A13. Edge/cloud task scheduling: QAOA vs classical (E8)
+
+Mean optimum / cost found (1 = optimal assignment):
+
+| n | exact | greedy | qaoa_ibm_emulator | qaoa_noiseless | qaoa_noisy | random_sampling | random_sampling_1000 | simulated_annealing |
+|---|---|---|---|---|---|---|---|---|
+| 4 | 1.000 | 0.770 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| 6 | 1.000 | 0.662 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| 8 | 1.000 | 0.715 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| 10 | 1.000 | 0.686 | - | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| 12 | 1.000 | 0.640 | - | 1.000 | 1.000 | 1.000 | 0.893 | 1.000 |
+| 14 | 1.000 | 0.820 | - | 1.000 | 1.000 | 1.000 | 0.861 | 1.000 |
+
+`random_sampling` draws as many uniform samples as the noiseless QAOA run measured in total (about 38 circuits x 1000 shots), because QAOA keeps the best sample it ever saw; `random_sampling_1000` draws 1000.
+
+
+Mean cost of a single sample (optimum / mean cost); best-of-shots hides this:
+
+| n | qaoa_noiseless | qaoa_noisy | random_sampling |
+|---|---|---|---|
+| 4 | 0.271 | 0.288 | 0.201 |
+| 6 | 0.184 | 0.185 | 0.188 |
+| 8 | 0.410 | 0.356 | 0.306 |
+| 10 | 0.262 | 0.266 | 0.262 |
+| 12 | 0.287 | 0.287 | 0.280 |
+| 14 | 0.378 | 0.381 | 0.379 |
+
+![](figures/e8_scheduling.png)
 
