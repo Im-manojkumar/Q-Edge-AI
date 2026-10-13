@@ -252,6 +252,22 @@ def test_sampling_mode_is_unbiased_with_honest_error_bars():
     assert np.all(spread[:4] > 1.5 * uncut_sd) and np.all(spread < 1.15 * r.gamma / math.sqrt(2000))
 
 
+def test_exact_term_error_bars_hold_at_few_shots():
+    """Few shots per piece is where plug-in variance formulas go wrong (1/n vs 1/(n-1), and the
+    product-of-means bias); the reported SE must still track the run-to-run spread."""
+    c = tfim_trotter(6, 2)
+    obs = [(2,), (2, 3), (0, 5), K.magnetisation_observable(6)]
+    exact = K.exact_expectations(c, obs)
+    be = _SeededSampler(5)
+    runs = [K.cut_expectations(c, obs, backend=be, shots=20) for _ in range(100)]
+    vals = np.array([r.values for r in runs])
+    ses = np.array([r.std_errors for r in runs])
+    spread = vals.std(axis=0, ddof=1)
+    assert np.all(np.abs(vals.mean(axis=0) - exact) < 4 * spread / 10)
+    ratio = ses.mean(axis=0) / spread
+    assert np.all((ratio > 0.75) & (ratio < 1.3)), ratio
+
+
 def test_counts_estimator_applies_ancilla_weights():
     # Bits: q0, q1, ancilla. Ancilla 1 flips the sign of the shot.
     counts = {"000": 30, "101": 10, "011": 20, "110": 40}
@@ -261,7 +277,7 @@ def test_counts_estimator_applies_ancilla_weights():
     assert vals == pytest.approx([(30 + 10 - 20 - 40) / 100, (30 - 10 + 20 - 40) / 100,
                                   1.0, (30 - 10 - 20 + 40) / 100])
     m = vals[0]
-    assert ses[0] == pytest.approx(math.sqrt((1 - m * m) / 100))
+    assert ses[0] == pytest.approx(math.sqrt((1 - m * m) / 99))   # unbiased sample variance / n
 
 
 def test_errors():
