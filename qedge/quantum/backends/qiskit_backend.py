@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import math
+import threading
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Callable
 
 from ..circuit import Circuit, normalise_counts
 from .base import NoiseSpec, QuantumBackend, await_job, current_token
@@ -34,6 +38,57 @@ def to_qiskit(c: Circuit, measure: bool = True):
 def qiskit_counts(raw: dict, n: int) -> dict[str, int]:
     # Qiskit prints qubit 0 as the rightmost bit; flip to our convention.
     return normalise_counts({k.replace(" ", "")[::-1]: v for k, v in raw.items()}, n)
+
+
+# ---- opt-in ISA hook (used by qedge.quantum.mitigation) ----------------------
+# Zero-noise extrapolation needs folded circuits that the transpiler has not had a
+# chance to simplify (optimisation level >= 1 cancels U U^dagger pairs), and readout
+# correction needs to know which physical qubit each classical bit was measured on.
+# Both only exist after layout and routing, inside ``_run``. ``isa_scope`` lets a
+# caller see and replace the final circuits on this thread without changing
+# ``QuantumBackend.run``; outside a scope every backend behaves exactly as before.
+
+@dataclass
+class ISAScope:
+    """``transform(isa_circuits, backend) -> circuits to execute`` (any length; each
+    must already be executable on the target, it is not transpiled again).
+    ``run_options`` go to ``AerSimulator.run`` (e.g. ``seed_simulator``); live devices
+    ignore them. Counts come back one per *executed* circuit, read with each
+    circuit's own classical-bit count."""
+
+    transform: Callable | None = None
+    run_options: dict = field(default_factory=dict)
+
+
+_isa_local = threading.local()
+
+
+@contextmanager
+def isa_scope(transform: Callable | None = None, **run_options):
+    stack = getattr(_isa_local, "stack", None)
+    if stack is None:
+        stack = _isa_local.stack = []
+    scope = ISAScope(transform, run_options)
+    stack.append(scope)
+    try:
+        yield scope
+    finally:
+        stack.pop()
+
+
+def current_isa_scope() -> ISAScope | None:
+    stack = getattr(_isa_local, "stack", None)
+    return stack[-1] if stack else None
+
+
+def _apply_scope(scope: ISAScope | None, isa: list, backend) -> list:
+    if scope is None or scope.transform is None:
+        return isa
+    return list(scope.transform(list(isa), backend))
+
+
+def _scoped_counts(res, isa: list) -> list[dict[str, int]]:
+    return [qiskit_counts(res.get_counts(i), qc.num_clbits) for i, qc in enumerate(isa)]
 
 
 def _aer_noise_model(noise: NoiseSpec):
@@ -72,6 +127,11 @@ class QiskitAerBackend(QuantumBackend):
         # Basis gates are kept as-is so the injected noise sees the same gate list
         # as the other frameworks.
         qcs = transpile(qcs, sim, optimization_level=0, num_processes=1)
+        scope = current_isa_scope()
+        if scope is not None:
+            qcs = _apply_scope(scope, qcs, self)
+            res = sim.run(qcs, shots=shots, **scope.run_options).result()
+            return _scoped_counts(res, qcs), {"transpiled_depths": [qc.depth() for qc in qcs]}
         res = sim.run(qcs, shots=shots).result()
         return [qiskit_counts(res.get_counts(i), c.n_qubits) for i, c in enumerate(circuits)], {}
 
@@ -120,6 +180,11 @@ class QiskitFakeIBMBackend(QuantumBackend):
             self._pm = generate_preset_pass_manager(optimization_level=1, backend=be, seed_transpiler=7)
         sim, pm = self._sim, self._pm
         isa = pm.run([to_qiskit(c) for c in circuits], num_processes=1)
+        scope = current_isa_scope()
+        if scope is not None:
+            isa = _apply_scope(scope, isa, self)
+            res = sim.run(isa, shots=shots, **scope.run_options).result()
+            return _scoped_counts(res, isa), {"transpiled_depths": [qc.depth() for qc in isa]}
         res = sim.run(isa, shots=shots).result()
         depths = [qc.depth() for qc in isa]
         return ([qiskit_counts(res.get_counts(i), c.n_qubits) for i, c in enumerate(circuits)],
@@ -243,6 +308,8 @@ class CalibratedIBMBackend(QuantumBackend):
         self.last_choice = choice
         cal = next(d for d in self.devices if d.name == choice.device)
         isa = [self._isa(c, choice, source) for c in circuits]
+        scope = current_isa_scope()
+        isa = _apply_scope(scope, isa, self)
         meta = {"device": choice.device, "calibration": cal.source, "layout": choice.layout,
                 "predicted_esp": choice.esp, "qiskit_default_esp": choice.default_esp,
                 "transpiled_depths": [qc.depth() for qc in isa]}
@@ -260,11 +327,25 @@ class CalibratedIBMBackend(QuantumBackend):
                 usage = job.usage()
             except Exception:
                 usage = None
-            counts = [qiskit_counts(r.data.meas.get_counts(), c.n_qubits) for r, c in zip(result, circuits)]
+            if scope is not None:  # executed circuits may differ from the submitted ones
+                counts = [qiskit_counts(_creg(r).get_counts(), qc.num_clbits) for r, qc in zip(result, isa)]
+            else:
+                counts = [qiskit_counts(r.data.meas.get_counts(), c.n_qubits) for r, c in zip(result, circuits)]
             meta.update(job_ids=[job.job_id()], qpu_seconds=usage, queue_time_s=max(0.0, total - (usage or 0.0)))
             return counts, meta
         from qiskit_aer import AerSimulator
         if cal.name not in self._sims:
             self._sims[cal.name] = AerSimulator.from_backend(cal.backend)
+        if scope is not None:
+            res = self._sims[cal.name].run(isa, shots=shots, **scope.run_options).result()
+            return _scoped_counts(res, isa), meta
         res = self._sims[cal.name].run(isa, shots=shots).result()
         return [qiskit_counts(res.get_counts(i), c.n_qubits) for i, c in enumerate(circuits)], meta
+
+
+def _creg(pub_result):
+    # SamplerV2 names the data field after the circuit's classical register ("meas"
+    # for measure_all, "c" for circuits rebuilt by calibration.best_layout).
+    data = pub_result.data
+    bits = getattr(data, "meas", None)
+    return bits if bits is not None else next(iter(data.values()))
