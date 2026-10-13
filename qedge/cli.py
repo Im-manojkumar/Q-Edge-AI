@@ -27,7 +27,7 @@ def main(argv=None):
     from .workloads import BUILDERS
     s = sub.add_parser("submit", help="plan and run one workload for real")
     s.add_argument("kind", choices=list(BUILDERS))
-    s.add_argument("params", nargs="*", help="key=value, e.g. n=8 steps=4, or k=4 batch=8 privacy=true")
+    s.add_argument("params", nargs="*", help="key=value, e.g. n=8 steps=4, model=h2 for ground_state, or k=4 batch=8 privacy=true")
     s.add_argument("--policy", default="qedge_adaptive")
     s.add_argument("--sim-stack", default="qiskit", choices=["qiskit", "pennylane", "cirq", "braket-local"])
     s.add_argument("--qpu-stack", default="ibm-auto", choices=["ibm-auto", "ibm", "braket", "ibm-emulator"],
@@ -56,7 +56,7 @@ def main(argv=None):
 
     e = sub.add_parser("experiments", help="run E1-E9 and regenerate figures")
     e.add_argument("--quick", action="store_true")
-    e.add_argument("--only", nargs="*", choices=["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e9"])
+    e.add_argument("--only", nargs="*", choices=["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9"])
     e.add_argument("--qpu-stack", default="ibm-auto")
 
     c = sub.add_parser("calibration", help="calibration-aware routing: devices, qubit choice, live logging, drift")

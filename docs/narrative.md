@@ -86,6 +86,7 @@ estimates. All modelling assumptions are in `docs/assumptions.md`.
 | E5 | Does the prototype run end to end? | Real payloads through the live orchestrator, and every quantum-capable job forced through classical, simulator and QPU-emulator paths. |
 | E6 | Does routing by calibration data pay off? | 16 TFIM, QAOA and kernel circuits (4 to 12 qubits) on eight IBM devices: v1's fixed device and default qubits vs the device and qubits chosen from per-qubit calibration, scored against the ideal output. |
 | E7 | Can the QPU's fixed costs and queue risk be managed? | Packing: up to 26 small circuits side by side in one emulated job on two devices, with and without free qubits between them and under assumed crosstalk levels. Batching and race mode: 11 policy/batching variants x 5 scenarios x 3 seeds in the simulator. Live race mode: the real orchestrator racing the QPU path against the classical fallback at deadlines either side of the QPU time. |
+| E8 | Do VQE and QAOA scheduling help? | VQE (RY ansatz, Rotosolve vs COBYLA) on H2 and spin chains against exact diagonalisation, on four stacks and the IBM emulator; QAOA on an edge/cloud task-assignment QUBO against exact search, annealing and random sampling with the same sample budget; 3 seeds. |
 | E9 | Should a neural network be split across edge, cloud and a quantum head, and is the split private? | A CNN on 8x8 digits with linear, MLP and quantum heads at k = 2 to 8 qubits, 3 seeds, transfer and end-to-end training; the quantum head on the emulated IBM device and in packed jobs; three reconstruction attacks on every cut; 2880 router decisions over devices, bandwidth, privacy, deadlines and QPU what-ifs. |
 
 ## 3. Results
@@ -289,7 +290,19 @@ QPU side is a network wait.
 
 ![](figures/e7_qpu_cost.png)
 
-### 3.8 A neural network split across edge, cloud and QPU (E9)
+### 3.8 VQE and QAOA task scheduling (E8)
+
+Two further hybrid algorithms were added. VQE estimates the ground-state energy of the hydrogen molecule and of the
+transverse-field Ising chain, using a hardware-efficient RY ansatz trained with Rotosolve. Noiselessly, it reaches the
+exact energy to within about 1 to 3 % of the spectral width, which beats COBYLA at the same budget. QAOA was also
+applied to Q-Edge's own placement problem: assigning tasks to edge or cloud as a QUBO. At up to 14 tasks it finds
+the optimum, but random sampling with the same number of samples does too, so the decision engine is calibrated
+to expect no quality gain from it. Exact diagonalisation and exact search remain faster at these sizes, so the
+engine keeps both workloads classical. Tables are in appendices A12 and A13.
+
+![](figures/e8_vqe.png)
+
+### 3.9 A neural network split across edge, cloud and QPU (E9)
 
 The realistic way quantum touches AI today is as a small layer inside a classical model, so E9 builds one and
 lets the router decide where to cut it. A small CNN on 8x8 digit images runs on the edge and compresses each
@@ -394,7 +407,7 @@ queue, price) moves the boundary, and the dashboard shows it moving.
 
 ```bash
 pip install -r requirements.txt
-pytest                                   # 229 tests
+pytest                                   # 259 tests
 python -m qedge experiments              # every experiment, then REPORT.md
 python -m qedge dashboard
 ```

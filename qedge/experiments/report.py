@@ -173,6 +173,35 @@ def build(path: str = "REPORT.md", narrative: str = "docs/narrative.md"):
                          "thread on the same machine:\n")
             parts.append(_md(lag, ".4g"))
         parts.append("\n![](figures/e7_race.png)\n")
+    vq = _r("e8_vqe.csv")
+    if vq is not None:
+        parts.append("## A12. VQE ground-state energy (E8)\n")
+        parts.append("Energy quality = 1 - (E - E0)/(Emax - E0): 1 at the exact ground state, about 0.5 for a fully "
+                     "mixed (pure noise) state. Mean over seeds:\n")
+        t = vq.pivot_table(index=["model", "n"], columns="method", values="quality").reset_index()
+        parts.append(_md(t, ".4f"))
+        h2 = vq[(vq.model == "h2") & (vq.kind == "hybrid")]
+        if len(h2):
+            parts.append("\nH2 error in mHa (chemical accuracy is 1.6 mHa):\n")
+            parts.append(_md(h2.assign(error_mHa=1000 * h2.error)
+                             .groupby("method").error_mHa.agg(["mean", "min", "max"]).reset_index(), ".2f"))
+        st = _r("e8_vqe_stacks.csv")
+        if st is not None:
+            parts.append("\nH2 with VQE on every stack:\n")
+            parts.append(_md(st, ".4f"))
+        parts.append("\n![](figures/e8_vqe.png)\n")
+    sc = _r("e8_scheduling.csv")
+    if sc is not None:
+        parts.append("## A13. Edge/cloud task scheduling: QAOA vs classical (E8)\n")
+        parts.append("Mean optimum / cost found (1 = optimal assignment):\n")
+        parts.append(_md(sc.pivot_table(index="n", columns="method", values="ratio").reset_index()))
+        parts.append("\n`random_sampling` draws as many uniform samples as the noiseless QAOA run measured in total "
+                     "(about 38 circuits x 1000 shots), because QAOA keeps the best sample it ever saw; "
+                     "`random_sampling_1000` draws 1000.\n")
+        ex = sc[sc.method.isin(["qaoa_noiseless", "qaoa_noisy", "random_sampling"])]
+        parts.append("\nMean cost of a single sample (optimum / mean cost); best-of-shots hides this:\n")
+        parts.append(_md(ex.pivot_table(index="n", columns="method", values="expected_ratio").reset_index()))
+        parts.append("\n![](figures/e8_scheduling.png)\n")
     hs = _r("e9_heads_summary.csv")
     if hs is not None:
         parts.append("## A14. Split model: classifier heads (E9)\n")

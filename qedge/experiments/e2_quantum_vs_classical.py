@@ -8,6 +8,7 @@ uses (written to results/calibration.json).
 from __future__ import annotations
 
 import json
+import os
 import time
 
 import numpy as np
@@ -147,6 +148,9 @@ def run(quick: bool = False, out_dir: str = "results") -> dict[str, pd.DataFrame
     tf = tfim(quick)
     st = qaoa_all_stacks(6 if quick else 8)
     cal = fit_calibration(mc, kn)
-    with open(f"{out_dir}/calibration.json", "w") as f:
+    path = f"{out_dir}/calibration.json"
+    if os.path.exists(path):  # keep entries other experiments (E8) fitted
+        cal = {**json.load(open(path)), **cal}
+    with open(path, "w") as f:
         json.dump(cal, f, indent=2)
     return {"e2_maxcut": mc, "e2_kernel": kn, "e2_tfim": tf, "e2_qaoa_stacks": st}

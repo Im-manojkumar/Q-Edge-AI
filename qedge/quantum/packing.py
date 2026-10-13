@@ -645,6 +645,8 @@ PACKABLE_KINDS = {"quantum_simulation"}
 _SKIP_REASON = {
     "optimization": "QAOA is an optimisation loop of many sequential jobs, not one circuit",
     "kernel_classification": "a quantum kernel needs O(n_train^2) circuits, not one",
+    "ground_state": "VQE is an optimisation loop of many sequential jobs, not one circuit",
+    "scheduling": "QAOA is an optimisation loop of many sequential jobs, not one circuit",
     "inference": "classical workload, no circuit",
     "training": "classical workload, no circuit",
 }

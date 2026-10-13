@@ -99,6 +99,17 @@ with tabs[0]:
             params["batch"] = st.slider("images in the batch", 1, 64, 8)
             params["deadline_s"] = st.number_input("deadline (s)", 0.01, 3600.0, 5.0)
             params["privacy"] = st.checkbox("private: only tensors measured as private may leave the edge")
+        elif kind == "ground_state":
+            params["model"] = st.radio("system", ["h2", "tfim"], horizontal=True,
+                                       format_func={"h2": "H₂ molecule (2 qubits)", "tfim": "spin chain"}.get)
+            if params["model"] == "tfim":
+                params["n"] = st.slider("spin-chain qubits", 2, 60, 6)
+            params["layers"] = st.slider("VQE ansatz layers", 1, 3, 1)
+            params["deadline_s"] = st.number_input("deadline (s)", 1.0, 7200.0, 600.0)
+        elif kind == "scheduling":
+            params["n"] = st.slider("tasks (qubits)", 3, 60, 8)
+            params["p"] = st.slider("QAOA layers p", 1, 3, 1)
+            params["deadline_s"] = st.number_input("deadline (s)", 1.0, 3600.0, 300.0)
         else:
             params["n"] = st.slider("spin-chain qubits", 4, 120, 8)
             params["steps"] = st.slider("Trotter steps", 1, 40, 4)
@@ -140,8 +151,10 @@ with tabs[0]:
 
     st.divider()
     force = st.selectbox("Placement to execute", ["(the decision)"] + [e.placement.label for e in d.estimates])
-    big = (kind == "quantum_simulation" and params["n"] > 20) or (kind == "optimization" and params["n"] > 16 and
-                                                                   "+" in (force if force != "(the decision)" else d.placement.label))
+    big = ((kind == "quantum_simulation" and params["n"] > 20) or (kind == "scheduling" and params["n"] > 20)
+           or (kind == "ground_state" and params.get("n", 2) > 14)
+           or (kind in ("optimization", "scheduling") and params["n"] > 16 and
+               "+" in (force if force != "(the decision)" else d.placement.label)))
     no_model = kind == "split_inference" and params["profile"] != "digits"
     rc1, rc2 = st.columns(2)
     race = rc1.checkbox("Race mode", help="If this runs on the QPU, run the best classical placement at the same time "
@@ -478,11 +491,16 @@ with tabs[6]:
     st.dataframe(summ, hide_index=True)
 
     c1, c2 = st.columns(2)
-    kind = c1.selectbox("Workload to place", ["quantum_simulation", "optimization", "kernel_classification"])
+    kind = c1.selectbox("Workload to place", ["quantum_simulation", "optimization", "kernel_classification",
+                                              "ground_state", "scheduling"])
     if kind == "quantum_simulation":
         params = {"n": c2.slider("qubits", 2, 20, 8), "steps": c2.slider("Trotter steps", 1, 6, 3)}
     elif kind == "optimization":
         params = {"n": c2.slider("graph nodes (qubits)", 3, 16, 8), "p": 1}
+    elif kind == "ground_state":
+        params = {"model": "tfim", "n": c2.slider("spin-chain qubits", 2, 20, 6), "layers": 1}
+    elif kind == "scheduling":
+        params = {"n": c2.slider("tasks (qubits)", 3, 12, 8), "p": 1}
     else:
         params = {"features": c2.slider("features (qubits)", 2, 12, 6), "n_train": 20, "n_test": 10}
 

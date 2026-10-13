@@ -18,12 +18,12 @@ Minor project, Department of AI & Data Science (Batch 20): Manoj Kumar P, Ayaan 
 | Job packing | `qedge/quantum/packing.py` | Runs several small circuits from different clients side by side in one QPU job on the best free qubit regions, optionally with a free-qubit ring between them, and splits the results: one queue wait, one task fee and one set of shots shared. |
 | Race mode | `Orchestrator.submit(..., race=True)`, `qedge/quantum/backends/base.py` | Runs the best classical placement next to a QPU job, delivers the QPU result only if it beats the deadline, and cancels the QPU job otherwise (real cancellation on IBM; emulators stop at the next circuit). |
 | Split hybrid neural network | `qedge/ml/`, `qedge/orchestrator/split.py` | A small CNN on the edge that compresses each image into k numbers, with a linear, MLP or k-qubit quantum classifier head (PennyLane, autograd backprop; the same weights run on every stack and in packed QPU jobs). The router chooses where to cut the network and where the head runs, and a reconstruction attack measures what each cut would reveal before anything private may leave the edge. |
-| Hybrid algorithms | `qedge/quantum/algorithms.py` | QAOA for MaxCut, quantum-kernel SVM, Trotterised spin-chain simulation, written once for every stack. |
-| Workloads | `qedge/workloads.py` | Inference, training, optimisation, kernel classification, quantum simulation, split inference, with compute, data, deadline, privacy and quantum-circuit profiles. |
+| Hybrid algorithms | `qedge/quantum/algorithms.py`, `vqe.py`, `scheduling.py` | QAOA for MaxCut, quantum-kernel SVM, Trotterised spin-chain simulation, VQE for ground-state energy (H₂ molecule, spin chain), and QAOA for edge/cloud task scheduling, written once for every stack. |
+| Workloads | `qedge/workloads.py` | Inference, training, optimisation, kernel classification, quantum simulation, ground state, scheduling, split inference, with compute, data, deadline, privacy and quantum-circuit profiles. |
 | Decision engine | `qedge/orchestrator/` | Cost model (latency, edge energy, total energy, money, quality), hard constraints, an explicit **quantum-benefit gate**, a weighted score, and a feedback loop that learns where reality differs from the model. |
 | Live prototype | `qedge/orchestrator/engine.py`, `qedge/executor.py` | Profile, monitor, decide, execute the real payload, evaluate, feed back. |
 | Simulation environment | `qedge/simulation/simulator.py` | Discrete-event simulator with hidden "true" conditions, 7 scenarios plus 2 future-QPU stress scenarios, optional QPU job batching and a hedged (race-mode) policy. |
-| Experiments | `qedge/experiments/` | E1 stacks, E2 quantum vs classical, E3 policies, E4 decision boundaries, E5 live runs, E6 calibration-aware routing, E7 job packing, batching and race mode, E9 the split neural network. |
+| Experiments | `qedge/experiments/` | E1 stacks, E2 quantum vs classical, E3 policies, E4 decision boundaries, E5 live runs, E6 calibration-aware routing, E7 job packing, batching and race mode, E8 VQE and QAOA scheduling vs classical, E9 the split neural network. |
 | Dashboard | `dashboard/app.py` | Streamlit: plan/run a workload, see why, run simulations, explore what-if maps, browse results. |
 | Report | `REPORT.md` | Research-style write-up of the results (narrative source in `docs/narrative.md`, tables generated from `results/`). |
 
@@ -36,6 +36,8 @@ pip install -r requirements.txt
 python -m qedge status                                # which stacks / devices are usable
 python -m qedge submit optimization n=8               # plan + run one workload, with the reasoning
 python -m qedge submit quantum_simulation n=8 steps=4 --force cloud_cpu+qpu   # force the QPU path
+python -m qedge submit ground_state model=h2 --force cloud_cpu+quantum_sim  # VQE on the hydrogen molecule
+python -m qedge submit scheduling n=8 --force cloud_cpu+quantum_sim         # QAOA edge/cloud task assignment
 python -m qedge simulate --scenario network_congested # compare 7 policies in simulation
 python -m qedge experiments --quick                   # every experiment, small sizes (minutes)
 python -m qedge experiments                           # full run (longer), rebuilds REPORT.md
@@ -48,7 +50,7 @@ python -m qedge split plan k=4 batch=8 privacy=true --bandwidth 5   # every way 
 python -m qedge split profile                         # measured head accuracies and leakage per cut
 python -m qedge submit split_inference k=4 batch=16 --force "edge_gpu>embedding>qpu"   # quantum head, packed
 python -m qedge dashboard                             # opens the dashboard in your browser
-pytest                                                # 229 tests
+pytest                                                # 259 tests
 ```
 
 ## Using real quantum hardware

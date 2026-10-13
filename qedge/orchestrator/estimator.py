@@ -14,7 +14,7 @@ import copy
 from dataclasses import dataclass, field
 
 from ..resources import DEFAULT_CATALOGUE, RADIO_POWER_W, Resource, ResourceState
-from ..workloads import Workload, kernel_quality, qaoa_quality
+from ..workloads import Workload, kernel_quality, qaoa_quality, scheduling_quality, vqe_quality
 
 
 @dataclass(frozen=True)
@@ -229,6 +229,10 @@ class CostModel:
             return kernel_quality(fid)
         if w.kind == "quantum_simulation":
             return fid
+        if w.kind == "ground_state":
+            return vqe_quality(w.params["n"], fid)
+        if w.kind == "scheduling":
+            return scheduling_quality(w.params["n"], fid)
         if w.kind == "split_inference":
             from .split import head_quality
             return head_quality(w, fid)
