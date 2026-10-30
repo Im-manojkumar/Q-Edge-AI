@@ -6,8 +6,6 @@ part goes to a quantum simulator or a real QPU. The premise is hybrid: quantum r
 for a narrow set of sub-problems; they do not replace CPUs and GPUs, and the framework only offloads when a
 measured or modelled benefit justifies the queue, noise, energy and price.
 
-Minor project, Department of AI & Data Science (Batch 20): Manoj Kumar P, Ayaan Syed A.
-
 ## What is in the box
 
 | Part | Where | What it does |
